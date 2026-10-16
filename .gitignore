@@ -1,0 +1,17 @@
+/.venv/
+/_external/
+/results/
+/checkpoints/
+/cache/
+__pycache__/
+.ruff_cache/
+*.py[cod]
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.npy
+*.npz
+*.json.gz
+*.log
+.env
