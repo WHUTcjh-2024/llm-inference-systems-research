@@ -1,6 +1,7 @@
 """Reject incomplete or internally inconsistent E1 output before handoff."""
 
 import argparse
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -51,6 +52,12 @@ def validate_trace(path: Path, batch_size: int, layers: int) -> None:
                 all(np.isfinite(array).all() for array in (q, keys, scores, prior)),
                 f"{prefix}: nonfinite values",
             )
+            require(np.all(prior[..., -1] == 1.0), f"{prefix}: missing diagonal prior")
+            diagonal_word, diagonal_bit = divmod(chunks, 32)
+            require(
+                np.all((mask[..., diagonal_word].view(np.uint32) >> diagonal_bit) & 1),
+                f"{prefix}: missing diagonal bit",
+            )
             mean_active_blocks(mask, chunks + 1)
 
 
@@ -67,6 +74,11 @@ def validate(results: dict, lock: dict, directory: Path) -> None:
     require(
         results.get("model_revision") == lock["model_revision"],
         "Model revision differs",
+    )
+    require(
+        results.get("lock_sha256")
+        == hashlib.sha256((directory / "e1.lock.json").read_bytes()).hexdigest(),
+        "Run lock digest differs",
     )
     decode_tokens = lock["new_tokens"] - 1
     tpot_count = decode_tokens * lock["repetitions"]
@@ -118,11 +130,54 @@ def validate(results: dict, lock: dict, directory: Path) -> None:
             f"{name}: density values",
         )
         require(
-            math.isfinite(item["router_share_of_tpot_p50_approx"])
-            and item["router_share_of_tpot_p50_approx"] > 0,
-            f"{name}: router share",
+            len(active["active_blocks_per_token"]) == decode_tokens
+            and len(active["possible_blocks_per_token"]) == decode_tokens
+            and all(
+                0 <= selected <= possible
+                for selected, possible in zip(
+                    active["active_blocks_per_token"],
+                    active["possible_blocks_per_token"],
+                )
+            ),
+            f"{name}: block counts",
         )
-        require(item["router_ms"]["count"] == decode_tokens, f"{name}: router count")
+        require(
+            math.isclose(
+                active["density"]["p50"],
+                np.median(active["density_per_token"]),
+                rel_tol=1e-5,
+                abs_tol=1e-8,
+            ),
+            f"{name}: density summary inconsistent",
+        )
+        for label, values_key in (
+            ("router_call_ms", "router_call_per_token_ms"),
+            ("router_host_enqueue_ms", "router_host_enqueue_per_token_ms"),
+        ):
+            require(item[label]["count"] == decode_tokens, f"{name}: {label} count")
+            values = item[values_key]
+            require(len(values) == decode_tokens, f"{name}: {values_key} length")
+            require(
+                all(math.isfinite(x) and x > 0 for x in values),
+                f"{name}: {values_key} values",
+            )
+        require(
+            item["router_stage_sum_ms"]["count"] == decode_tokens,
+            f"{name}: stage sum count",
+        )
+        share = item["router_call_share_of_tpot_p50_approx"]
+        require(math.isfinite(share) and share > 0, f"{name}: router share")
+        require(
+            math.isclose(
+                share,
+                np.median(item["router_call_per_token_ms"])
+                / np.median(
+                    [value for trial in item["tpot_trials_ms"] for value in trial]
+                ),
+                rel_tol=1e-5,
+            ),
+            f"{name}: router share inconsistent",
+        )
         trace_path = directory / item["trace_file"]
         require(
             trace_path.is_file() and trace_path.stat().st_size > 0,
@@ -138,6 +193,10 @@ def main() -> None:
     args = parser.parse_args()
     results = json.loads(args.results.read_text(encoding="utf-8"))
     lock = json.loads(args.lock.read_text(encoding="utf-8"))
+    require(
+        (args.results.parent / "e1.lock.json").read_bytes() == args.lock.read_bytes(),
+        "Run lock differs from requested lock",
+    )
     validate(results, lock, args.results.parent)
     print("E1 result schema and completeness verified.")
 

@@ -95,6 +95,21 @@ PY
 fi
 
 if [[ "$MODE" == "run" || "$MODE" == "all" ]]; then
+  RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  RUN_DIR="$PERSIST_ROOT/results/$RUN_ID"
+  mkdir -p "$RUN_DIR"
+  cp "$LOCK_FILE" "$RUN_DIR/e1.lock.json"
+  exec > >(tee -a "$RUN_DIR/session.log") 2>&1
+  on_run_exit() {
+    status=$?
+    if (( status == 0 )); then
+      printf 'complete\n' > "$RUN_DIR/exit-status.txt"
+    else
+      printf 'failed: exit code %s\n' "$status" > "$RUN_DIR/exit-status.txt"
+    fi
+  }
+  trap on_run_exit EXIT
+  printf 'E1 session: %s\n' "$RUN_DIR"
   [[ -x "$VENV_DIR/bin/python" ]] || { printf 'Run prepare first.\n' >&2; exit 2; }
   command -v nvidia-smi >/dev/null
   GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)"
@@ -110,17 +125,13 @@ if [[ "$MODE" == "run" || "$MODE" == "all" ]]; then
   "$VENV_DIR/bin/python" "$SCRIPT_DIR/scripts/verify_source.py" \
     --source "$SOURCE_DIR" --lock "$LOCK_FILE" --checkpoint "$MODEL_DIR" \
     --rehash-weight
-  RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
-  RUN_DIR="$PERSIST_ROOT/results/$RUN_ID"
-  mkdir -p "$RUN_DIR"
-  cp "$LOCK_FILE" "$RUN_DIR/e1.lock.json"
   nvidia-smi -q > "$RUN_DIR/nvidia-smi.txt"
   "$VENV_DIR/bin/python" -m pip freeze > "$RUN_DIR/pip-freeze.txt"
+  "$VENV_DIR/bin/python" "$SCRIPT_DIR/scripts/cache_smoke.py" \
+    2>&1 | tee "$RUN_DIR/cache-smoke.log"
   "$VENV_DIR/bin/python" -m pytest -q \
     "$SOURCE_DIR/test/test_smoke.py" "$SOURCE_DIR/test/test_llama_dash_attn.py" \
     2>&1 | tee "$RUN_DIR/official-tests.log"
-  "$VENV_DIR/bin/python" "$SCRIPT_DIR/scripts/cache_smoke.py" \
-    2>&1 | tee "$RUN_DIR/cache-smoke.log"
   "$VENV_DIR/bin/python" "$SOURCE_DIR/example/run_niah.py" \
     --model-path "$MODEL_DIR" --target-tokens 4096 --max-new-tokens 2 \
     --device cuda --attn-implementation dash_attn \

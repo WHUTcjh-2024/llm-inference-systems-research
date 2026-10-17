@@ -12,6 +12,7 @@ import math
 import platform
 import statistics
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -60,6 +61,57 @@ class ForwardEndEvents(LogitsProcessor):
             )
         torch.cuda.synchronize()
         return [a.elapsed_time(b) for a, b in zip(self.events, self.events[1:])]
+
+
+class RouteEvents:
+    """Time the unmodified upstream routing call in a separate decode pass."""
+
+    def __init__(self, upstream_decoding, expected_calls: int) -> None:
+        self.decoding = upstream_decoding
+        self.original = upstream_decoding.score_blocks
+        self.events = [
+            (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
+            for _ in range(expected_calls)
+        ]
+        self.host_call_ms: list[float] = []
+        self.recorded = 0
+
+    def score(self, *args, **kwargs):
+        if self.recorded >= len(self.events):
+            raise RuntimeError("More routing calls than expected")
+        start, end = self.events[self.recorded]
+        host_start = time.perf_counter_ns()
+        start.record()
+        result = self.original(*args, **kwargs)
+        end.record()
+        self.host_call_ms.append((time.perf_counter_ns() - host_start) / 1e6)
+        self.recorded += 1
+        return result
+
+    def __enter__(self):
+        self.decoding.score_blocks = self.score
+        return self
+
+    def __exit__(self, *_):
+        self.decoding.score_blocks = self.original
+
+    def per_token_ms(self, layers: int) -> dict[str, list[float]]:
+        if self.recorded != len(self.events):
+            raise RuntimeError(
+                f"Expected {len(self.events)} routing calls, got {self.recorded}"
+            )
+        torch.cuda.synchronize()
+        gpu_call_ms = [start.elapsed_time(end) for start, end in self.events]
+        return {
+            "gpu_stream": [
+                sum(gpu_call_ms[i : i + layers])
+                for i in range(0, len(gpu_call_ms), layers)
+            ],
+            "host_enqueue": [
+                sum(self.host_call_ms[i : i + layers])
+                for i in range(0, len(self.host_call_ms), layers)
+            ],
+        }
 
 
 class StageEvents:
@@ -360,6 +412,7 @@ def run() -> None:
         },
         "method": {
             "tpot": "CUDA event at each logits-processor callback; differences across decode forwards; original upstream router",
+            "router_call": "Separate pass wrapping the unchanged upstream score_blocks call with CUDA events; host enqueue time also recorded",
             "segments": "CUDA events around pinned Stage1, Stage2, Stage3 calls; sums across all layers per decode token; separate pass",
             "prefill": "excluded from TPOT and segment summaries",
             "prompt": "official NIAH S-1 builder; same prompt repeated for batch 2",
@@ -395,18 +448,21 @@ def run() -> None:
                     raise RuntimeError("Incorrect TPOT interval count")
                 tpot_trials.append(intervals)
             peak_memory_bytes = torch.cuda.max_memory_allocated()
-            # Only decode calls are replaced. Prefill still executes the upstream code.
             layers = model.config.num_hidden_layers
+            decode_tokens = lock["new_tokens"] - 1
+            with RouteEvents(decoding, layers * decode_tokens) as route_events:
+                generate(model, tokenizer, ids, mask, lock["new_tokens"])
+            route_call_values = route_events.per_token_ms(layers)
+            # Only decode calls are replaced. Prefill still executes the upstream code.
             with StageEvents(decoding, layers) as segments:
                 generate(model, tokenizer, ids, mask, lock["new_tokens"])
-            decode_tokens = lock["new_tokens"] - 1
             segments.validate_first()
             segments.save_trace(args.output / f"trace-{name}.npz", layers)
             stage_values = {
                 stage: segments.per_token_ms(stage, layers, decode_tokens)
                 for stage in ("stage1", "stage2", "stage3")
             }
-            route_values = [
+            route_stage_sum_values = [
                 a + b for a, b in zip(stage_values["stage1"], stage_values["stage2"])
             ]
             support_values = segments.support_per_token(layers, decode_tokens)
@@ -424,8 +480,14 @@ def run() -> None:
                     key: stats_ms(values) for key, values in stage_values.items()
                 },
                 "stage_per_token_ms": stage_values,
-                "router_ms": stats_ms(route_values),
-                "router_share_of_tpot_p50_approx": percentile(route_values, 0.5)
+                "router_call_ms": stats_ms(route_call_values["gpu_stream"]),
+                "router_call_per_token_ms": route_call_values["gpu_stream"],
+                "router_host_enqueue_ms": stats_ms(route_call_values["host_enqueue"]),
+                "router_host_enqueue_per_token_ms": route_call_values["host_enqueue"],
+                "router_stage_sum_ms": stats_ms(route_stage_sum_values),
+                "router_call_share_of_tpot_p50_approx": percentile(
+                    route_call_values["gpu_stream"], 0.5
+                )
                 / percentile(flat_tpot, 0.5),
                 "active": {
                     "density": summary(support_values["density"]),
@@ -438,7 +500,7 @@ def run() -> None:
             output["cases"][name] = result
             print(
                 f"{name}: TPOT p50={result['tpot_ms']['p50_ms']:.3f} ms, "
-                f"router share≈{result['router_share_of_tpot_p50_approx']:.2%}",
+                f"router call share≈{result['router_call_share_of_tpot_p50_approx']:.2%}",
                 flush=True,
             )
         except Exception as error:  # noqa: BLE001 - persist this case and continue the E1 matrix
