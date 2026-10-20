@@ -1,6 +1,15 @@
-# DashAttention E1 运行包
+# DashAttention E0/E1 运行包
 
-本目录只做修订方案的 E1：用官方 8B checkpoint 确认真实增量解码中的路由成本。**截至本地准备阶段，尚无 H20 实测结果。**
+本目录实现修订方案的本地 E0 正确性 oracle，并准备 E1：用官方 8B checkpoint 确认真实增量解码中的路由成本。**截至本地准备阶段，尚无 H20 实测结果。**
+
+## 本地 E0（无需租 GPU）
+
+```bash
+python -m unittest discover -s tests -v
+python scripts/e0_oracle.py --seed 0 --trials 100
+```
+
+E0 从固定源码逐式翻译三轮 Halley 状态机，并用分组上界执行最大值认证、逐轮暂缓和重新激活；比较每轮状态、最终概率、GQA prior 和 bitmask。代码及证明范围见 [E0 合同](docs/e0_contract.md)。随机例子的界在 CPU 双精度下构造并逐例校验；输出的少算分数数目**不是实际 GPU 加速或真实模型效果**。无 H20 时可以完成 E0，但 E1 真实瓶颈门槛和 E2 真实轨迹回放仍待测。
 
 ## 固定版本与存储
 
@@ -43,7 +52,7 @@ bash run_e1.sh all
 
 路由成本另做一次 32 token 生成：只包装原版 `decoding.score_blocks` 调用，以 CUDA 事件测量每个 decode token、所有层合计的 `router_call_ms`，另记录 CPU 侧调用与 launch 耗时 `router_host_enqueue_ms`。分段计时再做一次 32 token 生成：在不改源码文件的情况下，包装固定源码的两个 Triton kernel launch 与 `full_attn`，得到 Stage 1、Stage 2、Stage 3 的定位数据。计时结束后用同一输入重跑原版 router 做一致性对照，bitmask 必须相同，prior 必须数值一致。事件围住函数或 kernel 调用，可能包含 GPU 空闲与 launch 间隙；采集真实张量也会改变调度。因此这些单独运行**不能代替原版 TPOT，也不能解释为纯 kernel 执行时间**。`router_call_share_of_tpot_p50_approx` 是不同运行的中位数之比，仅作 E1 停止门槛初筛。
 
-路由密度直接从分段运行中**每个 decode token 的真实 bitmask**逐位计数，分母逐调用取实际 `nchunks+1`，再对层、batch 和 KV 头取平均；不额外生成一条不同轨迹。首个 decode token 的各层 `q_scaled`、`k_chunks`、Stage 1 `scores`、`bmask`、`prior` 保存为 `trace-*.npz`，供后续 A1/A2 离线验证；它们来自官方模型真实 NIAH prompt，不是随机张量。
+路由密度直接从分段运行中**每个 decode token 的真实 bitmask**逐位计数，分母逐调用取实际 `nchunks+1`，再对层、batch 和 KV 头取平均；不额外生成一条不同轨迹。首个 decode token 的各层 `q_scaled`、`k_chunks`、Stage 1 `scores`、`max_val`、`bmask`、`prior` 保存为 `trace-*.npz`，供后续 A1/A2 离线验证；它们来自官方模型真实 NIAH prompt，不是随机张量。
 
 每次运行单独建 UTC 时间戳目录：
 

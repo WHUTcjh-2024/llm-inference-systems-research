@@ -16,14 +16,14 @@ def require(condition: bool, message: str) -> None:
 
 
 def validate_trace(path: Path, batch_size: int, layers: int) -> None:
-    names = ("q_scaled", "k_chunks", "scores", "bmask", "prior")
+    names = ("q_scaled", "k_chunks", "scores", "max_val", "bmask", "prior")
     with np.load(path, allow_pickle=False) as archive:
         expected = {
             f"layer{layer:02d}_{name}" for layer in range(layers) for name in names
         }
         require(set(archive.files) == expected, f"{path.name}: trace keys")
         for layer in range(layers):
-            q, keys, scores, mask, prior = (
+            q, keys, scores, max_val, mask, prior = (
                 archive[f"layer{layer:02d}_{name}"] for name in names
             )
             prefix = f"{path.name}: layer {layer}"
@@ -36,6 +36,7 @@ def validate_trace(path: Path, batch_size: int, layers: int) -> None:
             )
             chunks = keys.shape[2]
             require(scores.shape == (batch_size, 32, chunks), f"{prefix}: scores shape")
+            require(max_val.shape == (batch_size, 32), f"{prefix}: max shape")
             require(
                 mask.shape == (batch_size, 2, 1, (chunks + 32) // 32),
                 f"{prefix}: bitmask shape",
@@ -45,12 +46,16 @@ def validate_trace(path: Path, batch_size: int, layers: int) -> None:
             )
             require(mask.dtype == np.int32, f"{prefix}: bitmask dtype")
             require(
-                all(array.dtype == np.float32 for array in (q, keys, scores, prior)),
+                all(array.dtype == np.float32 for array in (q, keys, scores, max_val, prior)),
                 f"{prefix}: float dtypes",
             )
             require(
-                all(np.isfinite(array).all() for array in (q, keys, scores, prior)),
+                all(np.isfinite(array).all() for array in (q, keys, scores, max_val, prior)),
                 f"{prefix}: nonfinite values",
+            )
+            require(
+                np.array_equal(max_val, np.maximum(-1e9, np.max(scores, axis=-1))),
+                f"{prefix}: max differs from Stage 1 scores",
             )
             require(np.all(prior[..., -1] == 1.0), f"{prefix}: missing diagonal prior")
             diagonal_word, diagonal_bit = divmod(chunks, 32)

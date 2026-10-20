@@ -242,6 +242,7 @@ class StageEvents:
                     "q_scaled": q.detach().clone(),
                     "k_chunks": k_blk.detach().clone(),
                     "scores": scores.detach(),
+                    "max_val": max_buf.detach(),
                     "bmask": bmask.detach(),
                     "prior": prior.detach(),
                 }

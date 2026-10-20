@@ -25,6 +25,7 @@ class TraceValidationTests(unittest.TestCase):
                 )
                 arrays[prefix + "k_chunks"] = np.zeros((1, 2, 1, 128), dtype=np.float32)
                 arrays[prefix + "scores"] = np.zeros((1, 32, 1), dtype=np.float32)
+                arrays[prefix + "max_val"] = np.zeros((1, 32), dtype=np.float32)
                 arrays[prefix + "bmask"] = np.full((1, 2, 1, 1), 3, dtype=np.int32)
                 arrays[prefix + "prior"] = np.ones((1, 2, 1, 2), dtype=np.float32)
             np.savez_compressed(path, **arrays)
@@ -38,6 +39,12 @@ class TraceValidationTests(unittest.TestCase):
             arrays["layer00_bmask"] = np.ones((1, 2, 1, 1), dtype=np.int32)
             np.savez_compressed(path, **arrays)
             with self.assertRaisesRegex(ValueError, "diagonal bit"):
+                validate_trace(path, batch_size=1, layers=32)
+
+            arrays["layer00_bmask"] = np.full((1, 2, 1, 1), 3, dtype=np.int32)
+            arrays["layer00_max_val"][0, 0] = 1.0
+            np.savez_compressed(path, **arrays)
+            with self.assertRaisesRegex(ValueError, "max differs"):
                 validate_trace(path, batch_size=1, layers=32)
 
     def test_route_share_must_match_samples(self) -> None:
