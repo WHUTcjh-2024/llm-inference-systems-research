@@ -9,7 +9,7 @@ python -m unittest discover -s tests -v
 python scripts/e0_oracle.py --seed 0 --trials 100
 ```
 
-E0 从固定源码逐式翻译三轮 Halley 状态机，并用分组上界执行最大值认证、逐轮暂缓和重新激活；比较每轮状态、最终概率、GQA prior 和 bitmask。代码及证明范围见 [E0 合同](docs/e0_contract.md)。随机例子的界在 CPU 双精度下构造并逐例校验；输出的少算分数数目**不是实际 GPU 加速或真实模型效果**。无 H20 时可以完成 E0，但 E1 真实瓶颈门槛和 E2 真实轨迹回放仍待测。
+E0 从固定源码逐式翻译三轮 Halley 状态机，并用分组上界执行最大值认证、逐轮暂缓和重新激活；比较每轮状态、最终概率、GQA prior 和 bitmask。测试增加了独立手算的有理数样例。另有 [条件式 FP32 包络原型](scripts/e0_fp32_bounds.py)，用精确有理数计算候选上界，并拒绝超出运算前提的输入。代码、误差推导和仍需在 GPU 上验证的前提见 [E0 合同](docs/e0_contract.md)。随机例子的界在 CPU 双精度下构造并逐例校验；输出的少算分数数目**不是实际 GPU 加速或真实模型效果**。无 H20 时可以完成 E0，但 E1 真实瓶颈门槛和 E2 真实轨迹回放仍待测。
 
 ## 固定版本与存储
 

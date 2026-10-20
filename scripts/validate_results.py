@@ -46,11 +46,17 @@ def validate_trace(path: Path, batch_size: int, layers: int) -> None:
             )
             require(mask.dtype == np.int32, f"{prefix}: bitmask dtype")
             require(
-                all(array.dtype == np.float32 for array in (q, keys, scores, max_val, prior)),
+                all(
+                    array.dtype == np.float32
+                    for array in (q, keys, scores, max_val, prior)
+                ),
                 f"{prefix}: float dtypes",
             )
             require(
-                all(np.isfinite(array).all() for array in (q, keys, scores, max_val, prior)),
+                all(
+                    np.isfinite(array).all()
+                    for array in (q, keys, scores, max_val, prior)
+                ),
                 f"{prefix}: nonfinite values",
             )
             require(

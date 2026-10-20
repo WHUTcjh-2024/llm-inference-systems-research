@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from e0_fp32_bounds import fp32_envelope_nodes
 from e0_oracle import (
     HeadResult,
     Node,
@@ -19,6 +20,31 @@ from e0_oracle import (
 
 
 class OracleTests(unittest.TestCase):
+    def test_independent_exact_halley_fixtures(self) -> None:
+        # Fraction arithmetic gives these values without calling the oracle.
+        # For x=[1]: t_0=1/2, f=-3/4, f'=-1, f''=2.
+        single = solve_full(np.array([2.0]))
+        self.assertAlmostEqual(single.steps[0].ff, -0.75)
+        self.assertAlmostEqual(single.steps[0].df, -1.0)
+        self.assertAlmostEqual(single.steps[0].ddf, 2.0)
+        for step, expected in zip(
+            single.steps,
+            (1 / 14, 1 / 9842, 1 / 3812798742494),
+        ):
+            self.assertAlmostEqual(step.t_after, expected, delta=1e-15)
+        self.assertAlmostEqual(single.probabilities[0], (1 - 1 / 3812798742494) ** 2)
+
+        # For x=[1,1], both leaves contribute in every round.
+        tied = solve_full(np.array([2.0, 2.0]))
+        self.assertAlmostEqual(tied.steps[0].ff, -0.5)
+        self.assertAlmostEqual(tied.steps[0].df, -2.0)
+        self.assertAlmostEqual(tied.steps[0].ddf, 4.0)
+        for step, expected in zip(
+            tied.steps,
+            (3 / 10, 577 / 1970, 4478554083 / 15290740090),
+        ):
+            self.assertAlmostEqual(step.t_after, expected, delta=1e-15)
+
     def test_deferred_node_reactivates_after_threshold_drops(self) -> None:
         # t_0 = 0.5; after one Halley step t_1 < 0.3.
         scores = np.array([2.0, 0.6])
@@ -101,6 +127,58 @@ class OracleTests(unittest.TestCase):
             self.assertGreaterEqual(
                 node.upper_x, max(float(np.dot(query, keys[i])) for i in node.indices)
             )
+
+    def test_conditional_fp32_envelope_covers_simulated_dot(self) -> None:
+        rng = np.random.default_rng(7)
+        scale = np.float32(1 / np.sqrt(16))
+        for _ in range(25):
+            query = rng.normal(size=16).astype(np.float32)
+            keys = rng.normal(size=(12, 16)).astype(np.float32)
+            nodes = fp32_envelope_nodes(query, keys, 3, scale=scale)
+            for node in nodes:
+                for index in node.indices:
+                    acc = np.float32(0)
+                    for left, right in zip(query, keys[index]):
+                        acc = np.float32(acc + np.float32(left * right))
+                    x = np.float32(np.float32(acc * scale) * np.float32(0.5))
+                    self.assertLessEqual(float(x), node.upper_x)
+
+    def test_fp32_envelope_rejects_unsupported_inputs(self) -> None:
+        query = np.array([1.0, -2.0], dtype=np.float32)
+        keys = np.array([[1.0, 1.0]], dtype=np.float32)
+        with self.assertRaisesRegex(ValueError, "float32"):
+            fp32_envelope_nodes(
+                query.astype(np.float64), keys, 1, scale=np.float32(0.5)
+            )
+        with self.assertRaisesRegex(ValueError, "scale"):
+            fp32_envelope_nodes(query, keys, 1, scale=0.5)
+        with self.assertRaisesRegex(ValueError, "subnormal"):
+            fp32_envelope_nodes(
+                np.array(
+                    [np.nextafter(np.float32(0), np.float32(1)), 1], dtype=np.float32
+                ),
+                keys,
+                1,
+                scale=np.float32(0.5),
+            )
+        with self.assertRaisesRegex(ValueError, "dot overflow"):
+            fp32_envelope_nodes(
+                np.array([1e38], dtype=np.float32),
+                np.array([[1e10]], dtype=np.float32),
+                1,
+                scale=np.float32(0.01),
+            )
+
+    def test_fp32_envelope_handles_negative_and_underflowing_scores(self) -> None:
+        for query, keys in (
+            ([-1.0], [[1.0]]),
+            ([1e-20], [[1e-20]]),
+        ):
+            q = np.array(query, dtype=np.float32)
+            k = np.array(keys, dtype=np.float32)
+            bound = fp32_envelope_nodes(q, k, 1, scale=np.float32(1))[0].upper_x
+            score = np.float32(np.float32(q[0] * k[0, 0]) * np.float32(0.5))
+            self.assertLessEqual(float(score), bound)
 
 
 if __name__ == "__main__":
