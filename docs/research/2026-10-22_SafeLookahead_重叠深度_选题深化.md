@@ -1,12 +1,16 @@
 # Safe Lookahead：把 host 重叠深度当作可调度资源
 
-更新：2026-10-22。定位：**单卡、每天约两小时、只做一个方向**，代码落在 vLLM、SGLang、FlashInfer、FlashAttention 等主流仓库。本文把此前的三个候选收敛为一个锚定方向，并给出可证伪上界、单卡实验、与相邻工作的差异和止损条件。
+更新：2026-10-22。定位：**单卡、每天约两小时、只做一个方向**，代码落在 vLLM、SGLang、FlashInfer、FlashAttention 等主流仓库。本文把此前的三个候选收敛为一个锚定方向，并给出一项可证伪的测量门槛、单卡实验、与相邻工作的差异和止损条件。
 
 本文是选题与实验决策，不是已有结果。本项目仍无目标 GPU 的实测数据；文中所有公开 issue/PR 的数字都属于报告者，不是我们的测量。
+
+> **2026-10-22 复审修订（回应 Codex review）**：本版收缩为一项可证伪的测量与机制实验。主要改动：明确 `step` 是引擎调度步；首个实验改为测实际领先深度、等待原因与 GPU 空闲；修正 CUDA Graph 的节点参数更新/并发语义；把 `S_max` 降为筛选模型；首阶段只做 vLLM + FlashInfer 的 plan buffer；删除"转 checker 仍可发 ATC/TPDS"的预设。逐条回应见附录。
 
 ## 摘要
 
 一句话：研究动态 LLM 服务里 **host 最多能安全地领先 GPU 多少步（safe lookahead `k`）**，它受什么约束，以及如何在有限显存下把 `k` 顶到最大。
+
+这里的 `step` 指引擎的一次 batch 调度/执行步（scheduler 为当前 batch 准备一次 forward，device 执行一次），不是同一请求的逐 token 生成步。**第一阶段的交付物不是控制器，而是证明目标路径上确实存在可安全利用的 `k>1`，且简单修复后仍有性能空间。**
 
 核心问题不是"buffer 归谁"，而是"**重叠深度是多少、能不能控制**"。版本/所有权协议只是实现手段；标题和 claim 统一用 **Safe Lookahead / overlap depth**，不用 "versioned execution" 或 "state ownership"——这两个词在 2026 年已被相邻工作占用（Retire、Execution-State Capsules）。
 
@@ -15,7 +19,7 @@
 | 原方向 | 在 Safe Lookahead 中的角色 | 是否独立立项 |
 |---|---|---|
 | ① 增量式、异步安全的 Attention Plan | plan buffer 的生命周期案例 | 否 |
-| ② 混合有状态模型的图安全 Prefill | recurrent state slot 的图内版本案例 | 否；GDN 图捕获已被上游 PR 抢跑 |
+| ② 混合有状态模型的图安全 Prefill | recurrent state slot 的图内版本案例 | 否；GDN 图捕获已有公开在途 PR（未合入），存在撞车风险 |
 | ③ 混合模型的角色感知缓存与执行 | KV block / draft pool 的回收案例 | 否；上游 POC 与 2026 论文已覆盖 |
 
 ## 一、为什么是 Safe Lookahead
@@ -51,12 +55,14 @@
 
 ### 2.1 执行模型
 
+本文的 `step` 指引擎的一次 batch 调度步，不是同一请求的逐 token 步。同一请求的下一个 token 依赖上一步的采样结果（`k_dep=1`），但不同请求的 batch 组合、plan 构建、block 回收仍可能领先；是否真的能领先、能领先多少，必须实测，不能由流水线公式推定。
+
 一个 decode step 中：
 
 - **host**：调度、构建 attention metadata/plan、分配与回收 KV block、采样后处理；
 - **device**：attention、GEMM/MoE、recurrent state 更新；
 - **async scheduling** 允许 host 领先 device 若干步；
-- **CUDA Graph** 在捕获时冻结 kernel 参数的指针，回放时不再经过 Python/分配器。
+- **CUDA Graph** 在捕获时固定 kernel 节点的参数与地址；回放不走常规 Python/分配路径，但参数可在两次 replay 之间用 CUDA API 更新（见 3.4）。
 
 可变执行状态分四类：
 
@@ -67,7 +73,7 @@
 | recurrent state slot | 中（MB） | 请求/chunk 级 | state pool 按 slot 复用 |
 | graph workspace（MoE/cuDNN/scratch） | 中 | 捕获时固定 | 预分配；禁止图内 resize |
 
-系统里同时存在**三个分配器**：Python 对象池、引擎的 block manager、CUDA/CUDA Graph 分配器。CUDA Graph 会绕过第三个分配器，所以"用 stream-ordered allocator 就好了"并不成立。
+系统里同时存在**三个分配器**：Python 对象池、引擎的 block manager、CUDA/CUDA Graph 内存池。捕获期间的内存分配进入 graph 的私有池，replay 不走常规分配路径；因此 block manager 与 graph 池的生命周期必须显式对齐，"用 stream-ordered allocator 就好了"并不成立。
 
 ### 2.2 三类失败模式
 
@@ -91,7 +97,7 @@
 
 ### 2.4 研究问题
 
-- **RQ1**：在目标负载上，当前引擎的 H/D 和可达重叠上界 `S_max` 是多少？哪些负载值得做？
+- **RQ1**：在目标负载上，引擎实际能维持多少 in-flight step（`k_actual`）？host 在等什么（采样 token、acceptance count、block free、event、Python/GIL）？GPU 空闲区间有多长、由谁造成？H/D 与 `S_max` 只作为上界参考。
 - **RQ2**：如何用 per-artifact 生命周期策略，以最小显存维持最大安全 `k`？
 - **RQ3**：单图多版本 kernel ABI 能否在不重新捕获的前提下服务 `k` 个 in-flight step？
 - **RQ4**：自适应 `k` 能否在显存与 SLO 约束下跑赢静态 `k=1/2/4`？
@@ -102,12 +108,12 @@
 | 层次 | 主张 | 评审视角 |
 |---|---|---|
 | L1 正确性 | 给 plan/block/state 加版本，消除 race | "RCU/双缓冲的工程应用"；不够 |
-| L2 性能模型 | 重叠有上界 `(H+D)/max(H,D)`；`k_max` 受资源与依赖约束 | 有可测、可证伪的 law；够 ATC/EuroSys |
+| L2 筛选模型 | 重叠有上界 `(H+D)/max(H,D)`；`k_max` 受资源与依赖约束 | 标准两阶段流水上界，只够筛选负载，不够当贡献 |
 | L3 机制+控制 | 单图多版本 kernel ABI + lifetime-aware allocator + 自适应 `k` | 算子与引擎联合；够 ASPLOS/EuroSys 主轨 |
 
-**所有权是手段，不是贡献本身。** 贡献是：一个有上界、有代价、可控制的系统资源。
+**所有权是手段，`S_max` 是筛选工具，二者都不是贡献本身。** 真正可能形成贡献的是：找出生产引擎中阻止领先的具体依赖，给出可证明安全、且明显优于 pageable staging / 同步 / 静态 ring 等简单修复的机制，并量化"简单修复之后仍剩下多少 gap"。
 
-### 3.1 上界模型
+### 3.1 筛选模型（不是贡献）
 
 设每步 host 时间为 H，device 时间为 D。
 
@@ -121,7 +127,7 @@
 |---|---|---|---|---|
 | S_max | 1.10× | 1.20× | 1.50× | 2.00× |
 
-这是 Amdahl 式上界。**论文的第一个实验就是测 H/D**：如果目标负载上 H/D < 0.1，后面的机制工作都不值得做。实际流水还要扣掉依赖停顿和 `k` 不足，所以真实可达值低于 `S_max`，这个差距本身就是论文要量化的对象。
+这是标准两阶段流水上界，只用于筛选负载：如果目标负载上 H/D < 0.1，后面的机制工作都不值得做。实际流水还要扣掉依赖停顿和 `k` 不足，所以真实可达值低于 `S_max`。**但 `S_max` 不是论文贡献**；第一个实验要测的是 `k_actual`、等待原因和 GPU 空闲，而不是只测 H/D。
 
 ### 3.2 两类约束必须分开
 
@@ -147,16 +153,23 @@
 
 **不要一刀切 double buffer。** 静态双缓冲把 `k` 锁死在 2、对大 artifact 显存翻倍，而且 spec decode 需要 `k>2`。论文必须画出"`k` vs 显存 vs TPOT"的 Pareto 曲线，证明静态双缓冲只是曲线上的一个点。
 
-### 3.4 算子侧 ABI：单图多版本
+### 3.4 算子侧 ABI：单图多版本的设计空间
 
-CUDA Graph 捕获时 kernel 参数（指针）是冻结的，所以版本号不能作为 host 传入的 kernel argument。可行做法：
+先修正一个过强的说法：CUDA Graph **不是**"kernel 参数完全冻结"。CUDA 提供 `cudaGraphExecKernelNodeSetParams` / `cudaGraphExecUpdate`，可以在两次 replay 之间更新 kernel 节点参数；也可以 clone 出多个 `graphExec`。真正的约束有两条：
 
-- 版本计数器放在 device memory，由一个小 commit kernel 更新；
-- plan 用 `plan_base + version * stride` 间接寻址；
-- kernel 使用静态 grid、pad 行写 null state，不读 host 值；
-- debug 模式下 kernel 校验版本，生产模式下由引擎保证。
+- 同一个 `graphExec` 不能与自身并发执行；要并发服务多个 in-flight step，需要多个 exec 克隆或设备端间接寻址；
+- `cudaGraphExecUpdate` 不能在 exec 正在执行时安全调用；host 必须等它完成，或改用独立 exec，否则会引入新的竞态。
 
-这是真正的 kernel/ABI 改动，也是本方向区别于"Python 层加锁"的地方。第一版只改 FlashInfer 的 decode plan，验证"一张图服务 `k` 个 in-flight step"；再扩到 prefill/mixed。
+因此至少有四种方案，必须实测比较，不能预设哪一种更好：
+
+| 方案 | 机制 | 代价 / 风险 |
+|---|---|---|
+| 每次 replay 更新节点参数 | host 调 `SetParams` | host 调用与排序；可能抵消领先收益 |
+| `k` 个 graphExec 克隆 | 每个 slot 固定指针 | 捕获与显存开销；实现简单 |
+| 静态 ring + device 版本计数 | 一张图，kernel 读版本 | 需要定义 commit/read 顺序；调试难 |
+| eager | 不走图 | 无图开销，但 launch 开销高 |
+
+本方向要测的是四者在 `k`、TPOT、显存和正确性上的差异。若采用 device 版本计数，必须说清：版本计数器由哪个 node 递增、kernel 在哪个点读取、host 写 slot `v+1` 与 device 读 slot `v` 如何用 event 排序。第一版只改 FlashInfer 的 decode plan，验证"一张图服务 `k` 个 in-flight step"；再扩到 prefill/mixed。
 
 ### 3.5 控制器
 
@@ -173,15 +186,15 @@ CUDA Graph 捕获时 kernel 参数（指针）是冻结的，所以版本号不�
 
 ### 4.1 学术价值
 
-- **一个可测的 law**：`S_max=(H+D)/max(H,D)` 与 `k_max=min(k_res,k_dep)`。简单，但能把"要不要做重叠"变成先验可判的问题。
+- **一个筛选模型 + 一个依赖分类**：`S_max` 只用来判断"这个负载值不值得做"；真正的贡献是把阻止 `k>1` 的依赖拆成资源、采样依赖、acceptance、event、Python/GIL 等可测类别，并指出哪些可移除。
 - **一个跨层机制**：host Python + C++ scheduler + device kernel + CUDA Graph 四层，配合单图多版本 ABI。这是算子与引擎联合优化，不是纯工具。
 - **一个可复现的 checker + bug corpus**：单卡就能复现 WAR/UAF/RAW 三类违反。
-- **venue**：ATC/EuroSys/ASPLOS 合理；OSDI/SOSP 偏难；TPDS 是稳妥的期刊路径。引用量不会爆，但会被后续引擎论文引用。
+- **venue**：只有在机制相对简单修复有稳定优势时，ATC/EuroSys/ASPLOS 才合理；OSDI/SOSP 偏难；TPDS 是稳妥的期刊路径。引用量不会爆，但会被后续引擎论文引用。
 
 ### 4.2 工业价值
 
 - **可靠性**：#61239 这类问题在生产里表现为 IMA/hang，报错位置和根因相隔很远，排查成本极高。一个低开销 checker 比一套协议更容易被 vLLM/SGLang 采纳。
-- **性能**：低延迟、小 batch、spec decode、hybrid、preemption 这些区间，H/D 可能到 0.2–0.5，重叠能拿回 10–30%；大 batch 8B 上只有几个点，要如实报告"这里不值得做"。
+- **性能**：低延迟、小 batch、spec decode、hybrid、preemption 这些区间，H/D 可能到 0.2–0.5，重叠理论上有 10–30% 空间；**前提是实测 `k>1` 且简单修复后仍有残余 gap**，否则收益为 0。大 batch 8B 上只有几个点，要如实报告"这里不值得做"。
 - **工程成本**：现在是每个 buffer 打一个补丁（defer free、pageable staging、don't resize workspace），协议化能减少重复修补。
 - **采纳路径**：checker/debug 工具最容易进上游；协议重写难，但可以作为可选路径。
 
@@ -217,15 +230,16 @@ CUDA Graph 捕获时 kernel 参数（指针）是冻结的，所以版本号不�
 | [Execution-State Capsules](https://arxiv.org/abs/2606.20537) | execution boundary / checkpoint | 不做 checkpoint/restore/fork；研究稳态重叠 |
 | [Memory-Sovereign](https://arxiv.org/abs/2608.23805) | residency / exact reuse | 不做 host/device pipeline 的 `k` 上界与控制 |
 | vLLM #62749 | decode step / metadata build | 单一形态；没有上界模型、没有控制器 |
-| **本方向** | **step / 最大化安全 `k`** | **上界 + 约束分解 + 单图多版本 ABI + 控制器** |
+| **本方向** | **step / 最大化安全 `k`** | **筛选模型 + 依赖分类 + 约束分解 + 单图多版本 ABI + 控制器** |
 
 ## 六、审稿人质疑与回答
 
 | 质疑 | 回答 |
 |---|---|
 | 为什么不直接 double buffer？ | 它把 `k` 锁死在 2；KV block 无法整份双缓冲；spec decode 需要 `k>2`；用 Pareto 曲线证明它只是特例。 |
-| CUDA stream 不是已经保证顺序了吗？ | stream 只排序 device work，不排序 host 对 pinned buffer 的写，也不管 Python 对象复用；CUDA Graph 还冻结地址、绕过分配器；engine 的 block manager 是第三个分配器。三个分配器，一个契约。 |
-| 这和 Retire 有什么区别？ | Retire 是请求级 authority/失效，单位是 request；本方向单位是 step，研究 H/D 与 `k` 的上界/控制，不涉及图内多版本 kernel ABI。 |
+| CUDA stream 不是已经保证顺序了吗？ | stream 只排序 device work，不排序 host 对 pinned buffer 的写，也不管 Python 对象复用；CUDA Graph 在捕获时固定地址、replay 不走常规分配路径；engine 的 block manager 是第三个分配器。三个分配器，一个契约。 |
+| 同一个 graphExec 能并发跑多个 step 吗？ | 不能；需要 `k` 个 exec 克隆，或一张图 + 设备端版本间接寻址。第 3.4 节列出四种方案并实测。 |
+| 这和 Retire 有什么区别？ | Retire 是请求级 authority/失效，单位是 request；本方向单位是 step，研究 `k_actual` 与 `k` 的上界/控制，不涉及图内多版本 kernel ABI。 |
 | 这和 vToken / Capsules 有什么区别？ | vToken 是 KV 驱逐与虚拟化，Capsules 是 checkpoint/restore；本方向不提出新的驱逐或快照机制，只研究稳态重叠深度。 |
 | 上游不是已经在修了吗？ | #45357、#59493、#62749 都是点修，没有模型、没有控制器、不覆盖组合场景。论文量化的是"点修之后还剩多少 gap"。 |
 | effect size 太小。 | 只打 H/D 高的区间：小 batch、短输出、spec decode、hybrid、preemption。大 batch 8B 上 H/D 可能 <0.1，直接报告"这里不值得做"，反而增加可信度。 |
@@ -273,7 +287,7 @@ CUDA Graph 捕获时 kernel 参数（指针）是冻结的，所以版本号不�
 
 ### 7.3 证据等级
 
-已正式发表：Marconi（MLSys 2025）、FlashInfer（MLSys 2025）、PagedAttention（SOSP 2023）、RadixAttention（NeurIPS 2024）等。预印本：HYPIC、DASC、vToken、Capsules、Memory-Sovereign、Retire。工程证据：上述 vLLM/SGLang/FlashInfer 的 PR/issue，反映截至 2026-10-22 的公开实现与报告者测量。本文假设：上界模型、`k_max` 分解、单图多版本 ABI、控制器，均待本项目实测。
+已正式发表：Marconi（MLSys 2025）、FlashInfer（MLSys 2025）、PagedAttention（SOSP 2023）、RadixAttention（NeurIPS 2024）等。预印本：HYPIC、DASC、vToken、Capsules、Memory-Sovereign、Retire。工程证据：上述 vLLM/SGLang/FlashInfer 的 PR/issue，反映截至 2026-10-22 的公开实现与报告者测量。本文假设：筛选模型、`k_max` 分解、单图多版本 ABI、控制器，均待 Gate 0 校准。
 
 ## 八、单卡实验设计
 
@@ -301,10 +315,14 @@ CUDA Graph 捕获时 kernel 参数（指针）是冻结的，所以版本号不�
 
 1. async off（H+D 基线）；
 2. 当前 async（`k≈1`）；
-3. 静态 `k=2/4` 双缓冲；
+3. 静态 `k=2/4` ring；
 4. 简单点修：#59493 式 pageable staging、#45357 式 defer free；
-5. 本协议（版本池 + 控制器）；
-6. 理论上界 `S_max`。
+5. 每次 replay 更新节点参数（`SetParams`）；
+6. `k` 个 graphExec 克隆；
+7. 本协议（版本池 + 控制器）；
+8. 理论上界 `S_max`（只作参考，不是对照组）。
+
+Gate 0 只比较 1–4 与 5/6，不做控制器；7 留到 Stage 1。
 
 ### 8.4 统计与记录
 
@@ -313,24 +331,41 @@ CUDA Graph 捕获时 kernel 参数（指针）是冻结的，所以版本号不�
 - 记录 commit hash、模型配置、warmup、图模式、显存、请求生成方法与 raw trace 的校验和；
 - 不把单次 nsys 的 idle 比例当结论；不把报告者的 H200/8×A100 数字外推到 A100。
 
-## 九、第一月计划
+## 九、Gate 0：先证明 k>1 有利可图（4 周）
+
+范围只做 **vLLM + FlashInfer + plan buffer**。不做 KV、recurrent state、SGLang，也不写控制器。
 
 | 周 | 任务 | 产出 |
 |---|---|---|
-| 1 | 锁版本、建环境、instrument H/D 与 GPU idle | 6 种负载的 H/D 表与 `S_max` |
-| 2 | 复现 #61239、#45357、FlashInfer #4553/#4827 | 3 类违反的触发条件与最小用例 |
-| 3 | plan ring buffer + device 版本计数 + 单图多版本 decode | 一张图服务 `k=2/3` 的正确性与开销 |
-| 4 | 自适应 `k` 控制器；决策 | 是否继续性能命题，或转 characterization/checker |
+| 1 | 锁版本、建环境；写 per-step instrumentation：host timeline、in-flight `k`、等待原因、GPU 空闲 | 一张"谁在等谁"的时序图 |
+| 2 | 复现 #61239；测 `k_actual` 在 B=1/8/32、chunked prefill、spec on/off 下的分布 | `k_actual` 分布与等待原因统计 |
+| 3 | 五类对照：同步、pageable staging、静态 ring `k=2/4`、`SetParams`、`k` 个 exec 克隆 | 正确性、TPOT、显存、`k` 的对比 |
+| 4 | 判定是否存在"简单修复后仍剩下"的 gap | Gate 0 通过/停止 |
+
+**Gate 0 的建议阈值（待实测校准）**：
+
+- 至少一种目标负载上 `k_actual > 1`；
+- 可归因于 plan/metadata/event 的 GPU 空闲超过 step 的 5%；
+- 简单修复后仍有 3–5% 的残余 gap；
+- 机制相对最强简单修复有稳定优势。
+
+四个条件缺一，就不进入 Stage 1。
 
 代码入口：
 
 - vLLM：`vllm/v1/attention/backends/flashinfer.py`、`vllm/v1/worker/gpu_model_runner.py`、`vllm/v1/core/sched/scheduler.py`、`vllm/v1/worker/gpu/attn_metadata_cudagraphs.py`；
 - FlashInfer：`include/flashinfer/attention/scheduler.cuh`、`decode.py` 的 `plan()`；
-- SGLang：`python/sglang/srt/layers/attention/flashinfer_backend.py`、`runner_backend_utils/breakable_cuda_graph/`。
+- SGLang（Stage 3）：`python/sglang/srt/layers/attention/flashinfer_backend.py`、`runner_backend_utils/breakable_cuda_graph/`。
 
 ## 十、最小可发表单元与 venue
 
-**MPU**：vLLM + FlashInfer + Qwen3-8B + A100 40GB；6 种负载的 H/D 与上界；四类 artifact 的生命周期策略；单图多版本 decode plan；自适应 `k`；3 类 bug 复现；checker 开销；SGLang 或 FlashAttention 复现一次。
+**Stage 1（论文核心）**：vLLM + FlashInfer + Qwen3-8B + A100 40GB；`k_actual` 与等待原因的 characterization；四种图内多版本方案对比；一个安全机制；1–2 类 bug 复现；端到端 TPOT/吞吐。
+
+**Stage 2（泛化）**：加入 KV block 或 recurrent state；自适应 `k` 控制器；第二类模型。
+
+**Stage 3（跨引擎/工具）**：SGLang 或 FlashAttention 复现；checker；bug corpus。
+
+论文 MPU = Stage 1 + Stage 2，加一次跨引擎检查；Stage 3 是加分项，不是首阶段目标。
 
 **Venue**：
 
@@ -338,14 +373,14 @@ CUDA Graph 捕获时 kernel 参数（指针）是冻结的，所以版本号不�
 - MLSys 不是 CCF-A；MLSys 2027 的 deadline 是 2026-10-30，不现实。
 - CCF-A 期刊：TPDS 是最现实的"顶刊"路径；TC/TOS/TOCS 可作备选。
 
-**时间**：每天约 2 小时，9–12 个月形成 MPU；先冲 ATC/EuroSys，再扩 TPDS。
+**时间**：Gate 0 通过后再估算；按每天约 2 小时，9–12 个月形成 Stage 1 是乐观上限。
 
 ## 十一、止损条件
 
-1. **H/D < 0.1 在目标负载上普遍成立** → 性能故事不成立，转"checker + characterization"论文（ATC/TPDS 仍可发）。
-2. **一个月内复现不出 ≥2 类独立违反** → bug corpus 太薄，转纯测量或换题。
+1. **`k_actual` 在目标负载上普遍只能到 1，或简单修复后残余 gap < 3%** → 性能故事不成立；checker/characterization 是否够 ATC/TPDS 需要重新评估，不能预设。
+2. **Gate 0 的四个条件缺一** → 不进入 Stage 1；先补测量或换题，不要用更大范围掩盖核心假设未成立。
 3. **单图多版本 ABI 做不动** → 退到 plan ring buffer + event-deferred KV free，仍是一篇机制论文，但天花板降到 MLSys/ATC。
-4. **上游先发了 lookahead 控制器** → 仍有上界模型、跨引擎契约和 bug corpus，不至于归零；但需重新定位。
+4. **上游先发了 lookahead 控制器** → 需要重新定位；可能只剩测量/工具价值，不能假设仍有论文贡献。
 
 ## 十二、与旧文档的关系
 
@@ -370,6 +405,17 @@ CUDA Graph 捕获时 kernel 参数（指针）是冻结的，所以版本号不�
 - **已发表**：会议/期刊正式论文；
 - **预印本**：arXiv，仅作相邻工作与撞车风险；
 - **工程证据**：官方仓库的 PR/issue，含报告者测量，需在目标卡独立复现；
-- **本文假设**：上界模型、`k_max` 分解、单图多版本 ABI、控制器、预期收益。
+- **本文假设**：筛选模型、`k_max` 分解、单图多版本 ABI、控制器、预期收益；均待 Gate 0 校准。
 
 未检索到同题论文不等于证明新颖性；所有公开数字在引用时必须标注来源与硬件条件。
+
+## 附录：对 2026-10-22 review 的逐条回应
+
+| # | 意见 | 处理 |
+|---|---|---|
+| 1 | 先证明目标路径有可利用的 `k>1`；`step` 定义不清 | 2.1 明确 `step` 是引擎 batch 调度步；RQ1 改为 `k_actual`/等待原因/GPU 空闲；新增 Gate 0 |
+| 2 | CUDA Graph 论证有误 | 3.4 改为四种设计空间，补充 `SetParams`、exec 克隆、同一 exec 不能并发；2.1 修正"绕过分配器" |
+| 3 | 上界不足以支撑贡献 | 3.1 降为筛选模型；贡献改为依赖分类 + 安全机制 + 相对简单修复的残余 gap |
+| 4 | 实施范围过大 | 首阶段只做 plan buffer；MPU 拆为 Stage 1/2/3；Gate 0 只有 4 周 |
+| 5 | "抢跑"措辞易误解 | README 与正文改为"公开在途 PR（未合入）" |
+| 6 | "转 checker 仍可发 ATC/TPDS"无保证 | 止损条件改为"重新评估"，不预设 venue |
