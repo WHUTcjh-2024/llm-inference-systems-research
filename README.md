@@ -1,19 +1,21 @@
 # 大模型推理算子与引擎研究
 
-本私有仓库保存当前选题、文献复审和后续经过审核的实验协议与结果。当前首选题是**增量式、异步安全的 Attention Plan**，目标是在主流推理引擎和 GPU 算子的交界处减少动态执行开销。
+本私有仓库保存当前选题、文献复审和后续经过审核的实验协议与结果。当前锚定方向是**可变执行状态的所有权与安全重叠**：把 host–device 重叠深度当作可调度资源，在 vLLM/SGLang/FlashInfer 上研究 attention plan、KV block、recurrent state 与 CUDA Graph workspace 的生命周期协议、单图多版本算子 ABI 和自适应 lookahead。
 
 ## 从这里开始
 
-1. [当前选题总览](docs/research/方向总览.md)：三条候选方向、优先级、验证对象和第一轮实验。
-2. [跨年文献与机制复审](docs/research/2026-10-21_主流推理引擎与算子_A会选题_跨年复审.md)：2023–2026 年先例、首选题与备选题的完整分析。
+1. [选题深化：所有权与安全重叠](docs/research/2026-10-22_所有权与安全重叠_选题深化.md)：锚定方向、上界模型、核心创新、单卡实验与止损。
+2. [当前选题总览](docs/research/方向总览.md)：三条候选的历史优先级与第一轮实验（已被 2026-10-22 的收敛取代）。
+3. [跨年文献与机制复审](docs/research/2026-10-21_主流推理引擎与算子_A会选题_跨年复审.md)：2023–2026 年先例与完整分析。
 
 ## 当前状态
 
 | 项目 | 状态 |
 |---|---|
-| 首选：增量式、异步安全的 Attention Plan | 研究假设；尚无本项目目标 GPU 的瓶颈或加速实测 |
-| 备选：混合有状态模型的图安全 Prefill | 公开问题与研究设计；尚无本项目复现 |
-| 储备：混合模型的角色感知缓存与执行 | 早期候选；已有近邻实现，尚未立项 |
+| 锚定：可变执行状态的所有权与安全重叠 | 研究假设；尚无本项目目标 GPU 的 H/D、lookahead 或加速实测 |
+| 案例 1：增量式 Attention Plan | 收敛为 plan buffer 所有权；不再独立立项 |
+| 案例 2：混合模型图安全 Prefill | 收敛为 recurrent state slot；GDN 图捕获已被上游 PR 抢跑 |
+| 案例 3：角色感知缓存与执行 | 收敛为 KV block 回收；不再独立立项 |
 
 第一轮以 [FlashInfer](https://github.com/flashinfer-ai/flashinfer) 与 [vLLM](https://github.com/vllm-project/vllm) 为主要代码路径，再评估 [SGLang](https://github.com/sgl-project/sglang)；[FlashAttention](https://github.com/Dao-AILab/flash-attention)是强基线。[DeepGEMM](https://github.com/deepseek-ai/DeepGEMM)与 [DeepInfer](https://github.com/deepseek-ai/DeepInfer)的使用边界见选题总览。
 
