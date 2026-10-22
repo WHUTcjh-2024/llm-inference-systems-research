@@ -6,7 +6,7 @@
 
 > **2026-10-22 复审修订（回应 Codex review）**：本版收缩为一项可证伪的测量与机制实验。主要改动：明确 `step` 是引擎调度步；首个实验改为测实际领先深度、等待原因与 GPU 空闲；修正 CUDA Graph 的节点参数更新/并发语义；把 `S_max` 降为筛选模型；首阶段只做 vLLM + FlashInfer 的 plan buffer；删除"转 checker 仍可发 ATC/TPDS"的预设。逐条回应见附录 A。
 
-> **2026-10-22 二次修订（回应独立 review）**：叙事从"host 能跑多前"改为"**图化之后剩余的重叠深度由什么决定**"，把 #62749 从威胁改为动机（1.4）；贡献收缩为一条主 claim + 两条支撑（第三节）；Gate 0 新增 `k_res`/`k_dep` 归因与单卡 PD consumer 旁路模拟（3.2.1、第九节）；新增 TLA+ 模型检查；Stage 1 范围砍半并新增 Plan B（checker 独立成篇，10.1）；补 Spexis（EMNLP '26）的命名区分；新增 venue 判定树。第七节四篇 arXiv 预印本已核验真实存在。逐条回应见附录 B。
+> **2026-10-22 二次修订（回应独立 review）**：叙事从"host 能跑多前"改为"**图化之后剩余的重叠深度由什么决定**"，把 #62749 从威胁改为动机（1.4）；贡献收缩为一条主 claim + 两条支撑（第三节）；Gate 0 新增 `k_res`/`k_dep` 归因与单卡 PD consumer 旁路模拟（3.2.1、第九节）；新增 TLA+ 模型检查；Stage 1 范围砍半并新增 Plan B（checker 独立成篇，10.1）；补 Spexis（EMNLP '26）的命名区分；新增 venue 判定树。第七节六篇 arXiv 预印本已核验真实存在。逐条回应见附录 B。
 
 > **2026-10-22 三轮修订（回应第二轮独立 review）**：主场景从 spec decode 改为 **mixed/ragged batch**，spec decode 降为 `k_dep` 边界案例（8.2.1）；主 claim 与第一版 bet 对齐，明确克隆只作可行性、最终机制是单图多版本（第三节）；新增 **exec 克隆显存/并发语义最小实验**（3.4.1，Gate 0 第一周必做）；Gate 0 扩为 **8–10 周**、五类对照砍为两类，新增**残余不可图化 host 工作**阈值与 S1–S3 预注册 surprise 假设（第九节）。逐条回应见附录 C。
 
@@ -36,7 +36,7 @@
 - 算子却希望调度计划、内存地址和 workspace 在若干步内保持稳定，最好能整段录进 CUDA Graph；
 - 引擎用"加同步 / 双缓冲 / 关闭 async"来保平安，代价是 GPU 等待、显存浪费和功能组合被禁用。
 
-把这三件事抽象一层，问题是同一个：**host 想跑在 GPU 前面，但能跑多远取决于可变状态还能保留几份。** 这个"多远"就是 Safe Lookahead。
+把这三件事抽象一层，问题是同一个：**host 想跑在 GPU 前面，但能跑多远取决于可变状态还能保留几份。** 这个"多远"就是 Safe Lookahead（初版定义；1.4 给出修正后的表述）。
 
 ### 1.2 为什么换名字
 
@@ -47,7 +47,7 @@
 
 前三个词必须避开。**"lookahead" 属于部分撞车**：Spexis 的前瞻发生在请求调度层，本文的 `k` 发生在 host–device 执行层，单位不同（request vs step），概念可区分。因此保留 **Safe Lookahead** 作工作名，但把"和 Spexis / lookahead decoding 的区别"写进摘要与第一节，不能等审稿人来问。若后续仍被混淆，标题回退为 **Safe Overlap Depth**，正文一律用 `overlap depth k` 作为无歧义术语。
 
-对于前三个词，继续使用它们，审稿人第一反应就是"和它们有什么区别"。换成 **Safe Lookahead** 后，单位是 **step**（不是 request），目标是 **稳态重叠**（不是修订、驱逐或快照），差异是结构性的；对 Spexis 则靠单位与层次区分。
+如果继续使用前三个词，审稿人第一反应就是"和它们有什么区别"。换成 **Safe Lookahead** 后，单位是 **step**（不是 request），目标是 **稳态重叠**（不是修订、驱逐或快照），差异是结构性的；对 Spexis 则靠单位与层次区分。
 
 ### 1.3 本文不主张什么
 
@@ -114,6 +114,8 @@
 
 结论：都是点修，没有"能跑多前"的模型，也没有控制器。
 
+点修还会制造新问题：vLLM [#49674](https://github.com/vllm-project/vllm/issues/49674) 报告延迟 block free 在 async KV consumer 下导致 **zero-progress preemption cascade**。这正说明需要统一模型，而不是继续逐点修补。
+
 ### 2.4 研究问题
 
 - **RQ1**：在目标负载上，引擎实际能维持多少 in-flight step（`k_actual`）？**把 `k` 的损失显式归因为 `k_res`（槽位/显存）还是 `k_dep`（采样 token、acceptance count、event 依赖）**，再细分 Python/GIL、block free 等实现因素。GPU 空闲区间有多长、由谁造成？这个归因决定本文的 lifetime-aware 机制是否有用武之地（见 3.2.1）。H/D 与 `S_max` 只作为上界参考。
@@ -161,7 +163,7 @@
 |---|---|---|---|---|
 | S_max | 1.10× | 1.20× | 1.50× | 2.00× |
 
-这是标准两阶段流水上界，只用于筛选负载：如果目标负载上 H/D < 0.1，后面的机制工作都不值得做。实际流水还要扣掉依赖停顿和 `k` 不足，所以真实可达值低于 `S_max`。**但 `S_max` 不是论文贡献**；第一个实验要测的是 `k_actual`、等待原因和 GPU 空闲，而不是只测 H/D。
+这是标准两阶段流水上界，只用于筛选负载：如果目标负载上 H/D < 0.1，后面的机制工作都不值得做。实际流水还要扣掉依赖停顿和 `k` 不足，所以真实可达值低于 `S_max`。**但 `S_max` 不是论文贡献**；第一个实验要测的是 `k_actual`、等待原因、GPU 空闲与残余 host 工作，而不是只测 H/D。
 
 ### 3.2 两类约束必须分开
 
@@ -223,11 +225,11 @@
 | 静态 ring + device 版本计数 | 一张图，kernel 读版本 | 需要定义 commit/read 顺序；调试难 |
 | eager | 不走图 | 无图开销，但 launch 开销高 |
 
-**本版的 bet（第一版只押一个）**：**`k` 个 `graphExec` 克隆**。理由：先以最低实现成本验证"`k` 个 in-flight step 能正确跑"，而不是先做最终机制。但"显存开销可接受"是**待验证假设**，不是结论——3.4.1 的实验可能直接推翻它。`SetParams` 与静态 `k=2` 作为对照；单图多版本（device 版本计数）是论文最终机制，不是第一版任务。**不在第一版把四条路都做完**。
+**本版的 bet（第一版只押一个）**：**`k` 个 `graphExec` 克隆**。理由：先以最低实现成本验证"`k` 个 in-flight step 能正确跑"，而不是先做最终机制。但"显存开销可接受"是**待验证假设**，不是结论——3.4.1 的实验可能直接推翻它。`SetParams` 作为最强对照；静态 `k=2` 留到 Stage 1；单图多版本（device 版本计数）是论文最终机制，不是第一版任务。**不在第一版把四条路都做完**。
 
 #### 3.4.1 exec 克隆的显存与并发语义：必须先验证，不能假设
 
-`k` 个 `graphExec` 克隆看似"实现简单、显存可接受"，但 CUDA Graph 的内存分配节点在多次 instantiate 时只有两种可能，且两种情况都对当前 bet 不利：
+`k` 个 `graphExec` 克隆看似"实现简单、显存可接受"，但 CUDA Graph 的内存分配节点在多次 instantiate 时至少存在两种可能（具体语义需实测确认），且两种情况都对当前 bet 不利：
 
 | 语义 | 后果 | 对 bet 的影响 |
 |---|---|---|
@@ -242,7 +244,11 @@
 
 **这个实验排在所有其他 Gate 0 任务之前**，因为它可能推翻 3.4 的整个设计空间。在结论出来之前，不要投入时间实现 plan ring 的版本计数。
 
-四者的完整对比只作为补充实验；第一版只测 bet 方案 + 最强对照（`SetParams` 与静态 `k=2`）。**第一版先改 FlashInfer 的 decode plan 做最小验证**；exec 克隆语义确认后，再扩到 **mixed/ragged 的 plan（主场景）**。
+**mixed/ragged 的形状问题（最终机制的前置风险）**：mixed/ragged 通常走 **piecewise graph**，"单图多版本"实际是"每段图的多版本"，版本计数必须跨段一致；段边界随形状变化时，可能需要按形状分桶（shape bucketing）+ 每桶多版本。若这一点做不动，最终机制退化为 `SetParams` 或克隆，论文 claim 要相应降级。Stage 1 开始前必须评估。
+
+若采用 device 版本计数（最终机制），必须说清：版本计数器由哪个 node 递增、kernel 在哪个点读取、host 写 slot `v+1` 与 device 读 slot `v` 如何用 event 排序。这是 Stage 1 的设计核心，也是 TLA+ 模型要验证的对象。
+
+四者的完整对比只作为补充实验；第一版只测 bet 方案 + 最强对照（`SetParams`）；静态 `k=2` 留到 Stage 1。**第一版先改 FlashInfer 的 decode plan 做最小验证**；exec 克隆语义确认后，再扩到 **mixed/ragged 的 plan（主场景）**。
 
 ### 3.5 控制器
 
@@ -294,7 +300,7 @@
 | 请求级 lookahead 调度 | 中 | Spexis 已占"lookahead scheduling"这个词；单位不同，但必须在 intro 明确区分 |
 | **Safe Lookahead / overlap depth** | **低到中** | 仍是最干净的切入点，但"没检索到同题"不等于空白 |
 
-**窗口大约 6–12 个月。** 相邻工作出现得很快；一旦工业实验室发一篇"safe async execution"，空间会被压缩。现在动手，2027 年中之前要形成 MPU。
+**窗口大约 6–12 个月。** 相邻工作出现得很快；一旦工业实验室发一篇"safe async execution"，空间会被压缩。现在动手，**2027 年底之前**要形成 MPU。
 
 ## 五、与相邻工作的差异
 
@@ -314,7 +320,7 @@
 |---|---|
 | 为什么不直接 double buffer？ | 它把 `k` 锁死在 2；KV block 无法整份双缓冲；mixed/ragged 的形状变化需要 `k>2`；用 Pareto 曲线证明它只是特例。 |
 | CUDA stream 不是已经保证顺序了吗？ | stream 只排序 device work，不排序 host 对 pinned buffer 的写，也不管 Python 对象复用；CUDA Graph 在捕获时固定地址、replay 不走常规分配路径；engine 的 block manager 是第三个分配器。三个分配器，一个契约。 |
-| 同一个 graphExec 能并发跑多个 step 吗？ | 不能；需要 `k` 个 exec 克隆，或一张图 + 设备端版本间接寻址。第 3.4 节列出四种方案并实测。 |
+| 同一个 graphExec 能并发跑多个 step 吗？ | 不能；需要 `k` 个 exec 克隆，或一张图 + 设备端版本间接寻址。第 3.4 节列出四种方案，第一版只实测克隆与 `SetParams` 对照。 |
 | 这和 Retire 有什么区别？ | Retire 是请求级 authority/失效，单位是 request；本方向单位是 step，研究 `k_actual` 与 `k` 的上界/控制，不涉及图内多版本 kernel ABI。 |
 | 这和 vToken / Capsules 有什么区别？ | vToken 是 KV 驱逐与虚拟化，Capsules 是 checkpoint/restore；本方向不提出新的驱逐或快照机制，只研究稳态重叠深度。 |
 | 这和 Spexis / lookahead decoding 有什么区别？ | Spexis 的 lookahead 是请求级投机调度（前瞻未来 batch），lookahead decoding 是一种解码算法；本文的 `k` 是 host–device in-flight 深度，单位是 step，研究对象是图化后剩余 `k` 的约束与机制。 |
@@ -366,7 +372,7 @@
 
 已正式发表：Marconi（MLSys 2025）、FlashInfer（MLSys 2025）、PagedAttention（SOSP 2023）、RadixAttention（NeurIPS 2024）等。预印本：HYPIC、DASC、vToken、Capsules、Memory-Sovereign、Retire。工程证据：上述 vLLM/SGLang/FlashInfer 的 PR/issue，反映截至 2026-10-22 的公开实现与报告者测量。本文假设：筛选模型、`k_max` 分解、单图多版本 ABI、控制器，均待 Gate 0 校准。
 
-> **2026-10-22 引用核验**：Retire（2610.01160）、vToken（2608.13263）、Execution-State Capsules（2606.20537）、Memory-Sovereign（2608.23805）四篇预印本均可在 arXiv 检索到，标题与正文引用一致；vLLM #61239 为真实 open issue。新增 Spexis（2609.34370，EMNLP '26）为直接相邻工作。核验只确认存在性与标题，未逐篇核对正文数字。
+> **2026-10-22 引用核验**：Retire（2610.01160）、vToken（2608.13263）、Execution-State Capsules（2606.20537）、Memory-Sovereign（2608.23805）、HYPIC（2607.01299）、DASC（2608.30386）六篇预印本均可在 arXiv 检索到，标题与正文引用一致；vLLM #61239 为真实 open issue，#45357 已合并。新增 Spexis（2609.34370，EMNLP '26）为直接相邻工作。核验只确认存在性、标题与合并状态，未逐篇核对正文数字。
 
 ## 八、单卡实验设计
 
@@ -398,14 +404,16 @@
 |---|---|---|---|
 | uniform decode | host build 已被 #62749 图化 | 机会在消失 | 对照，不是主场景 |
 | **mixed/ragged batch（chunked prefill + decode）** | 动态 metadata，host 成本高；请求间依赖较松 | **适用（`k_res`）** | **主场景** |
-| **preemption churn** | block 回收/复用 → `k_res` | **适用（`k_res`）** | **第二主场景** |
+| **preemption churn** | block 回收/复用与 plan 重建 → `k_res`（Gate 0 只测 plan 侧） | **部分适用（`k_res`）** | **第二主场景** |
 | spec decode | acceptance count → `k_dep` 强耦合 | **不适用**（版本池帮不上） | **边界案例**：说明机制何时失效 |
 
 具体安排：
 
 - 主场景用 mixed/ragged batch + chunked prefill + prefix 命中，因为 #62749 只覆盖 uniform decode，ragged/mixed 仍走 host（见 2.3），这是图化之后残余 host 工作最集中的地方；
-- preemption churn 作为第二主场景，测 block 生命周期对 `k` 的限制；
-- spec decode 只用于演示 `k_dep` 边界：预期版本池无效，转而讨论 device-side planning，这与 3.2.1 的第三种归因结论一致；
+- preemption churn 作为第二主场景，测 **preemption 事件对 plan buffer 复用与 `k` 的影响**；block manager 本身留到 Stage 2；
+- spec decode 只用于演示 `k_dep` 边界：预期版本池无效，转而讨论 device-side planning，这与 3.2.1 的**第二种**归因结论一致；
+- preemption churn 只作为**负载特征**启用，**不修改 KV block manager**；Gate 0 仍只动 plan buffer，block 生命周期留到 Stage 2；
+- mixed/ragged 的 plan artifact 可能不是 FlashInfer 的 decode plan，而是 **vLLM 的 attention metadata builder**。第一版先验证 decode plan；扩到 mixed/ragged 时必须先确认 artifact 边界，必要时把研究对象从 FlashInfer plan 扩到 vLLM metadata builder（代码入口已列）；
 - 评估指标为 **TTFT/TPOT SLO 下的 goodput**，不是只看 P50 TPOT；"P50 提升 5% 但 P95 变差"不算赢。
 
 **主场景的最终选择由 Gate 0 的 H/D 与残余 host 工作决定**，不预先写死：如果 mixed/ragged 的 H/D 太低（prefill 的 D 大），而 preemption churn 的 H/D 更高，则后者升为主场景。spec decode 不再作为主场景候选。
@@ -434,9 +442,9 @@ Gate 0 只比较 1（async off/同步）与 5/6（`SetParams` 或 exec 克隆）
 
 ## 九、Gate 0：先证明 k>1 有利可图，并归因 k_res/k_dep（8–10 周）
 
-范围只做 **vLLM + FlashInfer + plan buffer**。不做 KV、recurrent state、SGLang，也不写控制器；唯一例外是单卡 PD consumer 旁路模拟（只验证动机，不参与判定）。
+范围只做 **vLLM + FlashInfer + plan buffer**。不做 KV、recurrent state、SGLang，也不写控制器；唯一例外是单卡 PD consumer 旁路模拟（只验证动机，不参与判定）。preemption 只作为负载特征启用，不改 block manager。
 
-**时间预算**：按每天约 2 小时，8–10 周约 110–140 小时（含 2 周缓冲）。如果只能投入 4 周（≈56 小时），只保留 week 1 的两个最小实验、#61239 复现与归因，砍掉对照实验——不要压缩复现 race 的时间，那是最容易滑期的一环。
+**时间预算**：每天约 2 小时，8 周基础任务加最多 2 周缓冲（共 8–10 周），约 110–140 小时。如果只能投入 4 周（≈56 小时），只保留 week 1 的两个最小实验、#61239 复现与归因，砍掉对照实验——不要压缩复现 race 的时间，那是最容易滑期的一环。
 
 | 周 | 任务 | 产出 |
 |---|---|---|
@@ -466,7 +474,7 @@ Gate 0 只比较 1（async off/同步）与 5/6（`SetParams` 或 exec 克隆）
 
 **预注册的 surprise 假设（Gate 0 前写死，防止事后编故事）**：
 
-- **S1**：真正的 `k` 限制不是 plan buffer，而是 graph 私有内存池或 block manager 的生命周期；
+- **S1**：真正的 `k` 限制不是 plan buffer，而是 graph 私有内存池或 block manager 的生命周期（后者可能要到 Stage 2 才能定量）；
 - **S2**：简单点修后的残余 gap 来自三个分配器（Python 对象池、block manager、graph 池）的交互，而不是 host 延迟；
 - **S3**：async scheduling 的 token 投机已让 `k_dep>1`，因此 `k_res` 才是 binding constraint，版本池有空间。
 
@@ -507,13 +515,13 @@ Stage 1 必须包含**正确性论证**：用 TLA+/P 对 `k=2` 的 plan ring、c
 | 主场景残余 gap 15%+，机制稳定领先最强简单修复 | ASPLOS / EuroSys / ATC 主轨 |
 | 残余 gap 8–15%，或归因结论反直觉 | ATC |
 | 残余 gap 3–8% | TPDS / MLSys |
-| 残余 gap <3%，或 `k_dep` 恒为 1 | 主论文不成立，转 Plan B |
+| 残余 gap <3%，或 `k_dep` 恒为 1，或残余 host 工作 <5% | 主论文不成立，转 Plan B |
 
 阈值是启发式，不是承诺；以实测分布为准。
 
 ### 10.1 Plan B：checker / 诊断工具独立成篇
 
-如果 Gate 0 显示残余 gap <3%，或 `k_dep` 恒为 1，主论文不成立。此时仍有一条独立、低成本、有真实工业价值的路径：
+如果 Gate 0 显示残余 gap <3%，或 `k_dep` 恒为 1，或残余 host 工作 <5%，主论文不成立。此时仍有一条独立、低成本、有真实工业价值的路径：
 
 - **交付**：一个低开销动态 checker，复现 WAR/UAF/RAW 三类违反；一个 bug corpus；一份"async 引擎为何 hang"的归因方法。
 - **venue**：ATC tools track / MLSys / 期刊工具轨。
@@ -604,3 +612,6 @@ Stage 1 必须包含**正确性论证**：用 TLA+/P 对 `k=2` 的 plan ring、c
 | 4 | 叙事悖论：收益正比于被隐藏的 host 成本 | 1.4 新增悖论段；Gate 0 新增第 5 个阈值"残余不可图化 host 工作 ≥5% step time"；止损条件 7 |
 | 5 | Gate 0 四周预算不现实 | 改为 8–10 周（含 2 周缓冲），五类对照砍成两类；给出 4 周极限版的最小任务集 |
 | 6 | 缺少 surprise 的预注册 | 第九节新增 S1–S3 三个预注册假设；至少出现一个才具备论文价值 |
+| 7 | preemption churn 与"Gate 0 不做 KV"冲突 | 明确 preemption 只作负载特征启用，不修改 block manager；Gate 0 仍只动 plan buffer |
+| 8 | mixed/ragged 的 plan artifact 可能不是 FlashInfer decode plan | 8.2.1 增加边界说明：必要时把研究对象扩到 vLLM attention metadata builder；3.4 补充 piecewise graph 的"每段多版本"风险 |
+| 9 | 引用与工程证据需复核 | HYPIC、DASC 已核验；#45357 确认已合并；新增 #49674 作为"点修制造新问题"的证据 |
