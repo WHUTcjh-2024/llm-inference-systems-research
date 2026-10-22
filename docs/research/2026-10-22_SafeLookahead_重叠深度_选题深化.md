@@ -8,6 +8,8 @@
 
 > **2026-10-22 二次修订（回应独立 review）**：叙事从"host 能跑多前"改为"**图化之后剩余的重叠深度由什么决定**"，把 #62749 从威胁改为动机（1.4）；贡献收缩为一条主 claim + 两条支撑（第三节）；Gate 0 新增 `k_res`/`k_dep` 归因与单卡 PD consumer 旁路模拟（3.2.1、第九节）；新增 TLA+ 模型检查；Stage 1 范围砍半并新增 Plan B（checker 独立成篇，10.1）；补 Spexis（EMNLP '26）的命名区分；新增 venue 判定树。第七节四篇 arXiv 预印本已核验真实存在。逐条回应见附录 B。
 
+> **2026-10-22 三轮修订（回应第二轮独立 review）**：主场景从 spec decode 改为 **mixed/ragged batch**，spec decode 降为 `k_dep` 边界案例（8.2.1）；主 claim 与第一版 bet 对齐，明确克隆只作可行性、最终机制是单图多版本（第三节）；新增 **exec 克隆显存/并发语义最小实验**（3.4.1，Gate 0 第一周必做）；Gate 0 扩为 **8–10 周**、五类对照砍为两类，新增**残余不可图化 host 工作**阈值与 S1–S3 预注册 surprise 假设（第九节）。逐条回应见附录 C。
+
 ## 摘要
 
 一句话：研究动态 LLM 服务在 **CUDA Graph 逐步接管 host 常驻工作之后**，**剩余的 host–device 重叠深度 `k` 由什么决定**，它受什么约束，以及如何在有限显存下把 `k` 顶到最大。
@@ -66,6 +68,8 @@
 
 这样 #62749 不再是威胁，而是动机：它证明了"消除 host build 成本"可行，从而把问题逼到一个更准确的位置——**不是 host 有多慢，而是 host 能安全地领先几步、以及剩余的前瞻受什么限制**。需要诚实报告的反面情形是：若图化后 `k_dep` 恒为 1，则本题退化为"如何让图化更彻底"，而不是"如何控制重叠深度"（见 3.2.1 与止损条件 5）。
 
+这个叙事还有一个必须正面回答的悖论：**重叠的收益正比于被隐藏的 host 成本**。如果图化把 host 常驻成本消除了，`k>1` 的收益也趋近于 0。1.4 的命题只解决"`k` 由什么限制"，不解决"`k` 值不值得提"。因此 Gate 0 必须直接测量第三个量：**每步不可图化的残余 host 工作（µs）及其构成**。如果它在目标路径上不到 step time 的 5%，无论 `k` 能到多少，本题都不成立（阈值 5）。
+
 ## 二、问题定义
 
 ### 2.1 执行模型
@@ -120,12 +124,18 @@
 
 ## 三、核心创新：L1 → L3
 
-**主 claim（一句话）**：在图化接管 host 常驻成本之后，限制 `k` 的主要因素从"host 太慢"转为"少数不能入图的 artifact 的生命周期"；用 per-artifact 版本池 + 单图多版本 ABI，可以在显存不翻倍的前提下把安全 `k` 从 1 提到 N，并相对静态双缓冲/点修取得稳定收益。
+**主 claim（一句话）**：在图化接管 host 常驻成本之后，限制 `k` 的主要因素从"host 太慢"转为"少数不能入图的 artifact 的生命周期"；用 per-artifact 版本池 + **单图多版本 ABI**，可以在显存不翻倍的前提下把安全 `k` 从 1 提到 N，并相对静态双缓冲/点修取得稳定收益。
+
+**第一版与最终机制必须分开写，避免 claim 与实现不符**：
+
+- **第一版（Gate 0 至 Stage 1 早期）**：`k` 个 `graphExec` 克隆 + plan ring（在 3.4.1 实验通过后），只用于验证"`k` 个 in-flight step 可以正确且更快地跑"，**不声称是最终机制**；
+- **论文最终机制**：单图多版本（device 版本计数，或 `SetParams` + 版本间接寻址）；
+- **写作纪律**：克隆方案被 3.4.1 的实测淘汰之前，摘要与 claim 不得把"`k` 个克隆"当成贡献；若单图多版本做不动，则 claim 降级为"版本池 + 克隆"并如实报告。
 
 **两条支撑**：
 
 1. **归因**：把阻止 `k>1` 的原因分解为 `k_res`/`k_dep` 并实测各自占比。这本身是一个可发表的 characterization——即使机制假设被证伪，归因结论仍有价值。
-2. **机制**：plan buffer 的 `k` 版本 ring + device 版本计数，配合单图多版本 ABI，证明"一张图服务 `k` 个 in-flight step"。
+2. **机制**：plan buffer 的 `k` 版本 ring + device 版本计数，配合单图多版本 ABI，证明"一张图服务 `k` 个 in-flight step"；第一版用 exec 克隆做可行性对照。
 
 以下 L1–L3 是**评审视角下的贡献分层**，不是三个并列贡献：
 
@@ -193,7 +203,7 @@
 | recurrent state slot | slot pool + epoch；preemption 时延迟复用 | 中等，按请求/chunk 生命周期 |
 | graph workspace | 捕获前预分配 + 版本槽；禁止图内 resize | 地址被图冻结 |
 
-**不要一刀切 double buffer。** 静态双缓冲把 `k` 锁死在 2、对大 artifact 显存翻倍，而且 spec decode 需要 `k>2`。论文必须画出"`k` vs 显存 vs TPOT"的 Pareto 曲线，证明静态双缓冲只是曲线上的一个点。
+**不要一刀切 double buffer。** 静态双缓冲把 `k` 锁死在 2、对大 artifact 显存翻倍；mixed/ragged 的形状变化与 preemption 的回收也需要 `k>2`。论文必须画出"`k` vs 显存 vs TPOT"的 Pareto 曲线，证明静态双缓冲只是曲线上的一个点。
 
 注意：上表策略**全部针对 `k_res`**。它们不能消除 `k_dep`；如果 Gate 0 显示 `k_dep` 主导，这些策略最多把 `k` 提到 `k_dep` 为止。
 
@@ -213,9 +223,26 @@
 | 静态 ring + device 版本计数 | 一张图，kernel 读版本 | 需要定义 commit/read 顺序；调试难 |
 | eager | 不走图 | 无图开销，但 launch 开销高 |
 
-**本版的 bet（第一版只押一个）**：**`k` 个 `graphExec` 克隆**。理由：目标区间是 `k=2–4`，显存开销可接受；实现最简单、正确性最容易论证；不引入 device 版本计数的 commit/read 顺序调试成本。`SetParams` 只作对照（host 调用可能抵消领先收益）；静态 ring + device 版本计数作为 Stage 2 的进阶方案，只有当实测表明 `k>4` 或显存紧张、且 exec 克隆的捕获/显存开销不可接受时才启用。**不在第一版把四条路都做完**。
+**本版的 bet（第一版只押一个）**：**`k` 个 `graphExec` 克隆**。理由：先以最低实现成本验证"`k` 个 in-flight step 能正确跑"，而不是先做最终机制。但"显存开销可接受"是**待验证假设**，不是结论——3.4.1 的实验可能直接推翻它。`SetParams` 与静态 `k=2` 作为对照；单图多版本（device 版本计数）是论文最终机制，不是第一版任务。**不在第一版把四条路都做完**。
 
-四者的完整对比只作为补充实验；第一版只测 bet 方案 + 最强对照（`SetParams` 与静态 `k=2`）。**第一版只改 FlashInfer 的 decode plan**，验证"一张图服务 `k` 个 in-flight step"；再扩到 prefill/mixed。
+#### 3.4.1 exec 克隆的显存与并发语义：必须先验证，不能假设
+
+`k` 个 `graphExec` 克隆看似"实现简单、显存可接受"，但 CUDA Graph 的内存分配节点在多次 instantiate 时只有两种可能，且两种情况都对当前 bet 不利：
+
+| 语义 | 后果 | 对 bet 的影响 |
+|---|---|---|
+| 每次 instantiate 各自分配 graph 内存 | workspace 显存 ×k | "显存不翻倍"不成立，`k=4` 时可能不可接受 |
+| 多个 exec 共享同一 graph 内存池 | 并发 replay 在 workspace 上互相覆盖 | 正是要解决的 WAR，克隆不提供隔离 |
+
+**Gate 0 第一周必须做的最小实验（半天）**：同一张图 instantiate 两次，打印两次 exec 的 workspace 地址；并发 replay 两个 exec，检查输出是否被污染、是否触发 race。结论直接决定后续设计：
+
+- **地址相同且 race** → 克隆只能串行，不能服务 `k` 个 in-flight step，bet 作废，转 `SetParams` 或 device 版本计数；
+- **地址不同但显存 ×k** → 克隆只适合 `k=2`；`k>2` 必须转单图多版本；
+- **既隔离又不显著增显存** → 克隆可作为第一版，但论文最终机制仍需单图多版本。
+
+**这个实验排在所有其他 Gate 0 任务之前**，因为它可能推翻 3.4 的整个设计空间。在结论出来之前，不要投入时间实现 plan ring 的版本计数。
+
+四者的完整对比只作为补充实验；第一版只测 bet 方案 + 最强对照（`SetParams` 与静态 `k=2`）。**第一版先改 FlashInfer 的 decode plan 做最小验证**；exec 克隆语义确认后，再扩到 **mixed/ragged 的 plan（主场景）**。
 
 ### 3.5 控制器
 
@@ -240,7 +267,7 @@
 ### 4.2 工业价值
 
 - **可靠性**：#61239 这类问题在生产里表现为 IMA/hang，报错位置和根因相隔很远，排查成本极高。一个低开销 checker 比一套协议更容易被 vLLM/SGLang 采纳。
-- **性能**：低延迟、小 batch、spec decode、hybrid、preemption 这些区间，H/D 可能到 0.2–0.5，重叠理论上有 10–30% 空间；**前提是实测 `k>1` 且简单修复后仍有残余 gap**，否则收益为 0。大 batch 8B 上只有几个点，要如实报告"这里不值得做"。
+- **性能**：低延迟、小 batch、mixed/ragged prefill、hybrid、preemption 这些区间，H/D 可能到 0.2–0.5，重叠理论上有 10–30% 空间；spec decode 的 H/D 也高，但受 `k_dep` 限制，只作边界案例；**前提是实测 `k>1`、残余 host 工作 ≥5% 且简单修复后仍有残余 gap**，否则收益为 0。大 batch 8B 上只有几个点，要如实报告"这里不值得做"。
 - **工程成本**：现在是每个 buffer 打一个补丁（defer free、pageable staging、don't resize workspace），协议化能减少重复修补。
 - **采纳路径**：checker/debug 工具最容易进上游；协议重写难，但可以作为可选路径。
 
@@ -285,14 +312,14 @@
 
 | 质疑 | 回答 |
 |---|---|
-| 为什么不直接 double buffer？ | 它把 `k` 锁死在 2；KV block 无法整份双缓冲；spec decode 需要 `k>2`；用 Pareto 曲线证明它只是特例。 |
+| 为什么不直接 double buffer？ | 它把 `k` 锁死在 2；KV block 无法整份双缓冲；mixed/ragged 的形状变化需要 `k>2`；用 Pareto 曲线证明它只是特例。 |
 | CUDA stream 不是已经保证顺序了吗？ | stream 只排序 device work，不排序 host 对 pinned buffer 的写，也不管 Python 对象复用；CUDA Graph 在捕获时固定地址、replay 不走常规分配路径；engine 的 block manager 是第三个分配器。三个分配器，一个契约。 |
 | 同一个 graphExec 能并发跑多个 step 吗？ | 不能；需要 `k` 个 exec 克隆，或一张图 + 设备端版本间接寻址。第 3.4 节列出四种方案并实测。 |
 | 这和 Retire 有什么区别？ | Retire 是请求级 authority/失效，单位是 request；本方向单位是 step，研究 `k_actual` 与 `k` 的上界/控制，不涉及图内多版本 kernel ABI。 |
 | 这和 vToken / Capsules 有什么区别？ | vToken 是 KV 驱逐与虚拟化，Capsules 是 checkpoint/restore；本方向不提出新的驱逐或快照机制，只研究稳态重叠深度。 |
 | 这和 Spexis / lookahead decoding 有什么区别？ | Spexis 的 lookahead 是请求级投机调度（前瞻未来 batch），lookahead decoding 是一种解码算法；本文的 `k` 是 host–device in-flight 深度，单位是 step，研究对象是图化后剩余 `k` 的约束与机制。 |
 | 上游不是已经在修了吗？ | #45357、#59493、#62749 都是点修，没有模型、没有控制器、不覆盖组合场景。论文量化的是"点修之后还剩多少 gap"。 |
-| effect size 太小。 | 只打 H/D 高的区间：小 batch、短输出、spec decode、hybrid、preemption。大 batch 8B 上 H/D 可能 <0.1，直接报告"这里不值得做"，反而增加可信度。 |
+| effect size 太小。 | 只打 H/D 高且 `k_res` 主导的区间：小 batch、mixed/ragged、hybrid、preemption。大 batch 8B 上 H/D 可能 <0.1，直接报告"这里不值得做"，反而增加可信度。 |
 | 这不就是 RCU/EBR？ | EBR 假设单一分配器、没有冻结指针；这里是 host Python + C++ scheduler + device kernel + graph replay 四层跨边界，且要控制 lookahead，不只是回收。 |
 | checker 能证明正确吗？ | 它是动态检查器，不是证明；配不变量 + 压力测试 + 误报率，不声称 sound。 |
 | 只做单卡够吗？ | 核心 claim 都是 per-device 的；多卡是 future work。单卡是受控实验，不是缺陷。 |
@@ -359,20 +386,31 @@
 | 引擎 | vLLM 0.31 + MRv2；SGLang 0.5.16 |
 | 后端 | FlashInfer；FlashAttention（无状态对照） |
 | 模型 | Qwen3-8B（dense）；Qwen3.5-9B（hybrid） |
-| 模式 | async on/off；graph eager/piecewise/full；**spec on（主场景）**/off；preemption on/off |
+| 模式 | async on/off；graph eager/piecewise/full；**mixed/ragged（主场景）**；**preemption churn（第二主场景）**；spec on（边界案例）/off |
 | 负载 | B=1/8/32；短/长输出；chunked prefill；prefix 命中；4k 单请求；高 churn |
 | 指标 | H、D、H/D、`S_max`、`k_max`、实际 `k`、GPU idle、TPOT P50/P95、**SLO 下的 goodput**、吞吐、显存、violation 数 |
 
-### 8.2.1 主场景：spec decode + preemption churn
+### 8.2.1 主场景：mixed/ragged batch（+ preemption churn），spec decode 降为边界案例
 
-不要再把合成 B=1 decode 当主场景——那里 H/D 最低、也最容易被图化吃掉。**效应量最大的区间是 spec decode 与 preemption churn 的叠加**：
+主场景必须与机制对齐。按 3.2.1，版本池解的是 `k_res`；因此主场景应选 `k_res` 主导、且 #62749 尚未图化的路径。
 
-- spec decode 的验证步让 `k_dep` 与 acceptance count 强耦合，`k>2` 是刚需，静态双缓冲直接失效；
-- preemption 让 block 回收与图内指针的冲突概率上升，`k_res` 的 loss 也最高；
-- 这两类负载在真实服务里存在（高并发、长短混合），不是为论文构造的；
-- 评估指标改为 **在 TTFT/TPOT SLO 下的 goodput**，而不是只看 P50 TPOT。一个"P50 提升 5% 但 P95 变差"的结果不应算赢。
+| 场景 | 主要约束 | 本文机制是否适用 | 在论文中的角色 |
+|---|---|---|---|
+| uniform decode | host build 已被 #62749 图化 | 机会在消失 | 对照，不是主场景 |
+| **mixed/ragged batch（chunked prefill + decode）** | 动态 metadata，host 成本高；请求间依赖较松 | **适用（`k_res`）** | **主场景** |
+| **preemption churn** | block 回收/复用 → `k_res` | **适用（`k_res`）** | **第二主场景** |
+| spec decode | acceptance count → `k_dep` 强耦合 | **不适用**（版本池帮不上） | **边界案例**：说明机制何时失效 |
 
-如果主场景上仍测不到 `k>1` 或残余 gap，说明本题的效应量不足以支撑主轨，直接按第十节的 venue 判定树降级，不要用更多负载组合掩盖。
+具体安排：
+
+- 主场景用 mixed/ragged batch + chunked prefill + prefix 命中，因为 #62749 只覆盖 uniform decode，ragged/mixed 仍走 host（见 2.3），这是图化之后残余 host 工作最集中的地方；
+- preemption churn 作为第二主场景，测 block 生命周期对 `k` 的限制；
+- spec decode 只用于演示 `k_dep` 边界：预期版本池无效，转而讨论 device-side planning，这与 3.2.1 的第三种归因结论一致；
+- 评估指标为 **TTFT/TPOT SLO 下的 goodput**，不是只看 P50 TPOT；"P50 提升 5% 但 P95 变差"不算赢。
+
+**主场景的最终选择由 Gate 0 的 H/D 与残余 host 工作决定**，不预先写死：如果 mixed/ragged 的 H/D 太低（prefill 的 D 大），而 preemption churn 的 H/D 更高，则后者升为主场景。spec decode 不再作为主场景候选。
+
+如果所有 `k_res` 候选上仍测不到 `k>1` 或残余 gap，说明本题的效应量不足以支撑主轨，按第十节 venue 判定树降级，不要用更多负载组合掩盖。
 
 ### 8.3 对照组
 
@@ -385,7 +423,7 @@
 7. 本协议（版本池 + 控制器）；
 8. 理论上界 `S_max`（只作参考，不是对照组）。
 
-Gate 0 只比较 1–4 与 5/6，不做控制器；7 留到 Stage 1。
+Gate 0 只比较 1（async off/同步）与 5/6（`SetParams` 或 exec 克隆），不做 2–4；7 留到 Stage 1。2–4 是 Stage 1 的完整对照集，不是 Gate 0 的任务。
 
 ### 8.4 统计与记录
 
@@ -394,32 +432,45 @@ Gate 0 只比较 1–4 与 5/6，不做控制器；7 留到 Stage 1。
 - 记录 commit hash、模型配置、warmup、图模式、显存、请求生成方法与 raw trace 的校验和；
 - 不把单次 nsys 的 idle 比例当结论；不把报告者的 H200/8×A100 数字外推到 A100。
 
-## 九、Gate 0：先证明 k>1 有利可图，并归因 k_res/k_dep（4 周）
+## 九、Gate 0：先证明 k>1 有利可图，并归因 k_res/k_dep（8–10 周）
 
 范围只做 **vLLM + FlashInfer + plan buffer**。不做 KV、recurrent state、SGLang，也不写控制器；唯一例外是单卡 PD consumer 旁路模拟（只验证动机，不参与判定）。
 
+**时间预算**：按每天约 2 小时，8–10 周约 110–140 小时（含 2 周缓冲）。如果只能投入 4 周（≈56 小时），只保留 week 1 的两个最小实验、#61239 复现与归因，砍掉对照实验——不要压缩复现 race 的时间，那是最容易滑期的一环。
+
 | 周 | 任务 | 产出 |
 |---|---|---|
-| 1 | 锁版本、建环境；写 per-step instrumentation：host timeline、in-flight `k`、等待原因、GPU 空闲 | 一张"谁在等谁"的时序图 |
-| 2 | 复现 #61239；测 `k_actual` 在 B=1/8/32、chunked prefill、spec on/off 下的分布；**把每次等待归因为 `k_res` vs `k_dep`** | `k_actual` 分布与 `k_res`/`k_dep` 归因统计 |
-| 2（旁路） | **单卡 PD consumer 模拟**：双进程共享一卡，或人为延迟 block free，复现 #45357 类 UAF | 动机场景是否成立的单卡证据（不参与 Gate 0 判定） |
-| 3 | 五类对照：同步、pageable staging、静态 ring `k=2/4`、`SetParams`、`k` 个 exec 克隆 | 正确性、TPOT、显存、`k` 的对比 |
-| 4 | 判定是否存在"简单修复后仍剩下"的 gap，并给出 `k_res`/`k_dep` 归因结论 | Gate 0 通过/停止 + 归因判定 |
+| 1（最高优先级） | **(a) exec 克隆语义**：同图 instantiate 两次，打印 workspace 地址；并发 replay 检查污染（3.4.1）。**(b) 残余 host 工作**：per-step 记录不可图化 host 工作及构成 | exec 克隆能否服务 `k` 个 in-flight step 的结论；残余 host 工作基线 |
+| 2 | 锁版本、建环境；写 per-step instrumentation：host timeline、in-flight `k`、等待原因、GPU 空闲 | 一张"谁在等谁"的时序图 |
+| 3 | 复现 #61239；测 `k_actual` 在 mixed/ragged、preemption、B=1/8/32 下的分布；**把每次等待归因为 `k_res` vs `k_dep`** | `k_actual` 分布与归因统计 |
+| 3（旁路） | **单卡 PD consumer 模拟**（时间盒 2 天）：双进程共享一卡，或人为延迟 block free，复现 #45357 类 UAF | 动机场景是否成立的单卡证据（不参与判定） |
+| 4–6 | **两类对照**：同步 vs exec 克隆（或 `SetParams`），不做其余对照 | 正确性、TPOT、显存、`k` |
+| 7 | 重复测量与稳定复现；补充 mixed/ragged 与 preemption 的对照 | 中位数 + IQR，排除单次噪声 |
+| 8 | 判定残余 gap、归因结论与 surprise 假设 | Gate 0 通过/停止 |
 
-**Gate 0 的建议阈值（待实测校准）**：
+**Gate 0 的五个阈值（待实测校准）**：
 
-- 至少一种目标负载上 `k_actual > 1`；
-- 可归因于 plan/metadata/event 的 GPU 空闲超过 step 的 5%；
-- 简单修复后仍有 3–5% 的残余 gap；
-- 机制相对最强简单修复有稳定优势。
+1. 至少一种目标负载上 `k_actual > 1`；
+2. 可归因于 plan/metadata/event 的 GPU 空闲超过 step 的 5%；
+3. 简单修复后仍有 3–5% 的残余 gap；
+4. 机制相对最强简单修复有稳定优势；
+5. **每步不可图化的残余 host 工作 ≥5% step time**——这是 1.4 悖论的直接检验；低于 5% 时，即使 `k>1` 也没有收益空间。
 
-四个条件缺一，或归因门槛不满足，就不进入 Stage 1。
+五个条件缺一，或归因门槛不满足，就不进入 Stage 1。
 
-**归因门槛（新增，最高优先级）**：
+**归因门槛（最高优先级）**：
 
 - `k_res` 主导 → 机制方向成立，进入 Stage 1；
 - `k_dep` 主导且可移除 → 改写 L3 为 device-side planning，重新评估工作量；
 - `k_dep` 恒为 1 → 止损，转 Plan B。
+
+**预注册的 surprise 假设（Gate 0 前写死，防止事后编故事）**：
+
+- **S1**：真正的 `k` 限制不是 plan buffer，而是 graph 私有内存池或 block manager 的生命周期；
+- **S2**：简单点修后的残余 gap 来自三个分配器（Python 对象池、block manager、graph 池）的交互，而不是 host 延迟；
+- **S3**：async scheduling 的 token 投机已让 `k_dep>1`，因此 `k_res` 才是 binding constraint，版本池有空间。
+
+**至少出现一个**，characterization 才有论文价值；一个都不出现，说明结果符合预期，按 Plan B 处理。S3 是最有利的结果；S1/S2 需要重写动机段。
 
 **旁路实验说明**：单卡 PD consumer 模拟只用于回答"#45357 的动机在单卡上是否仍然存在"，不扩大 Gate 0 主范围。若单卡无法复现，必须在论文里明确写出"PD consumer 的动机证据来自多机场景，本文未验证"，不能用单卡结果替代。
 
@@ -431,11 +482,11 @@ Gate 0 只比较 1–4 与 5/6，不做控制器；7 留到 Stage 1。
 
 ## 十、最小可发表单元与 venue
 
-**Stage 1（论文核心，范围已砍半）**：vLLM + FlashInfer + Qwen3-8B + A100 40GB；`k_res`/`k_dep` 归因；**一种**图内多版本方案（`k` 个 exec 克隆）+ plan ring；1 类 bug 复现；spec decode 主场景下的 SLO goodput。四种方案的完整对比降为补充实验，不占主线。
+**Stage 1（论文核心，范围已砍半）**：vLLM + FlashInfer + Qwen3-8B + A100 40GB；`k_res`/`k_dep` 归因；**plan ring + 单图多版本 ABI**（第一版用 exec 克隆做可行性对照，最终机制以 3.4.1 的结论为准）；1 类 bug 复现；**mixed/ragged 或 preemption 主场景**下的 SLO goodput。四种方案的完整对比降为补充实验。
 
 Stage 1 必须包含**正确性论证**：用 TLA+/P 对 `k=2` 的 plan ring、commit/read 顺序、block epoch 做小模型检查；给出不变量与反例。checker 只作动态辅助，不声称 sound。
 
-**Stage 2（泛化）**：加入 KV block 或 recurrent state；自适应 `k` 控制器；第二类模型；device 版本计数（若 exec 克隆的开销不可接受）。
+**Stage 2（泛化）**：加入 KV block 或 recurrent state；自适应 `k` 控制器；第二类模型；单图多版本（若第一版用克隆）。
 
 **Stage 3（跨引擎/工具）**：SGLang 或 FlashAttention 复现；checker；bug corpus。
 
@@ -458,6 +509,8 @@ Stage 1 必须包含**正确性论证**：用 TLA+/P 对 `k=2` 的 plan ring、c
 | 残余 gap 3–8% | TPDS / MLSys |
 | 残余 gap <3%，或 `k_dep` 恒为 1 | 主论文不成立，转 Plan B |
 
+阈值是启发式，不是承诺；以实测分布为准。
+
 ### 10.1 Plan B：checker / 诊断工具独立成篇
 
 如果 Gate 0 显示残余 gap <3%，或 `k_dep` 恒为 1，主论文不成立。此时仍有一条独立、低成本、有真实工业价值的路径：
@@ -474,11 +527,12 @@ Stage 1 必须包含**正确性论证**：用 TLA+/P 对 `k=2` 的 plan ring、c
 ## 十一、止损条件
 
 1. **`k_actual` 在目标负载上普遍只能到 1，或简单修复后残余 gap < 3%** → 性能故事不成立；转 Plan B（10.1），不要预设 checker 能发主轨。
-2. **Gate 0 的四个条件缺一** → 不进入 Stage 1；先补测量或换题，不要用更大范围掩盖核心假设未成立。
+2. **Gate 0 的五个条件缺一，或归因门槛不满足** → 不进入 Stage 1；先补测量或换题，不要用更大范围掩盖核心假设未成立。
 3. **单图多版本 ABI 做不动** → 退到 plan ring buffer + event-deferred KV free，仍是一篇机制论文，但天花板降到 MLSys/ATC。
 4. **上游先发了 lookahead 控制器** → 需要重新定位；可能只剩测量/工具价值，不能假设仍有论文贡献。
 5. **`k_dep` 主导且不可移除，或恒为 1** → 本文的 lifetime-aware 机制不成立；转 device-side planning 或 Plan B，不要用版本池硬撑。
 6. **证据量停留在 3–8% 且没有反直觉结论** → 不要投主轨，按 venue 判定树降级；硬投 ASPLOS/ATC 会被"效应量不足"直接拒。
+7. **每步残余不可图化 host 工作 <5% step time** → 即使 `k>1` 也没有收益空间；主论文不成立，转 Plan B。
 
 ## 十二、与旧文档的关系
 
@@ -490,14 +544,17 @@ Stage 1 必须包含**正确性论证**：用 TLA+/P 对 `k=2` 的 plan ring、c
 
 ## 十三、待办
 
+- [ ] **第一周：exec 克隆语义实验**（workspace 地址 + 并发污染），结论决定 3.4 的设计；
+- [ ] **第一周：残余不可图化 host 工作基线**（µs/step 及构成）；
 - [ ] 锁定 vLLM/FlashInfer/SGLang 的 commit 与镜像；
 - [ ] 读 Spexis（2609.34370）并写一段与本文的区分，确保 intro 第一段就能说清；
-- [ ] 写 H/D 与 `k_res`/`k_dep` 归因采集脚本，配置 spec decode 主场景；
+- [ ] 写 H/D 与 `k_res`/`k_dep` 归因采集脚本，配置 mixed/ragged 与 preemption 主场景；
 - [ ] 复现 #61239（4,097-token 单请求、chunked prefill、fp8 KV、async 默认开）；
-- [ ] 搭单卡 PD consumer 旁路模拟（延迟 block free），验证 #45357 动机；
+- [ ] 搭单卡 PD consumer 旁路模拟（延迟 block free，时间盒 2 天）；
 - [ ] 读 #62749、#61952、#45357 的实现，标注可复用与不可复用部分；
 - [ ] 写 TLA+ 模型（`k=2` 的 plan ring + commit/read 顺序 + block epoch）；
-- [ ] 设计 `k` 个 exec 克隆的原型（第一版唯一主方案）；
+- [ ] 设计 `k` 个 exec 克隆原型（只作可行性，不作最终机制）；
+- [ ] 设计单图多版本 ABI 原型（论文最终机制）；
 - [ ] 决定第一版 `k` 控制器是静态扫描还是反馈控制；
 - [ ] instrumentation 从第一周起就设计成 checker 可复用；
 - [ ] 记录每次租卡的 GPU 小时与实验目的。
@@ -518,7 +575,7 @@ Stage 1 必须包含**正确性论证**：用 TLA+/P 对 `k=2` 的 plan ring、c
 | 1 | 先证明目标路径有可利用的 `k>1`；`step` 定义不清 | 2.1 明确 `step` 是引擎 batch 调度步；RQ1 改为 `k_actual`/等待原因/GPU 空闲；新增 Gate 0 |
 | 2 | CUDA Graph 论证有误 | 3.4 改为四种设计空间，补充 `SetParams`、exec 克隆、同一 exec 不能并发；2.1 修正"绕过分配器" |
 | 3 | 上界不足以支撑贡献 | 3.1 降为筛选模型；贡献改为依赖分类 + 安全机制 + 相对简单修复的残余 gap |
-| 4 | 实施范围过大 | 首阶段只做 plan buffer；MPU 拆为 Stage 1/2/3；Gate 0 只有 4 周 |
+| 4 | 实施范围过大 | 首阶段只做 plan buffer；MPU 拆为 Stage 1/2/3；Gate 0 只有 4 周（三轮修订后改为 8–10 周，见附录 C） |
 | 5 | "抢跑"措辞易误解 | README 与正文改为"公开在途 PR（未合入）" |
 | 6 | "转 checker 仍可发 ATC/TPDS"无保证 | 止损条件改为"重新评估"，不预设 venue |
 
@@ -533,6 +590,17 @@ Stage 1 必须包含**正确性论证**：用 TLA+/P 对 `k=2` 的 plan ring、c
 | 5 | 效应量与 venue 不匹配 | 第十节新增 venue 判定树；明确 3–8% 不进主轨、<3% 转 Plan B |
 | 6 | 命名撞车 Spexis / lookahead decoding | 1.2、4.3、5、6 增加区分；准备回退名 Safe Overlap Depth |
 | 7 | 正确性论证空洞 | Stage 1 新增 TLA+/P 模型检查；todo 增加建模任务；checker 仍不声称 sound |
-| 8 | 缺 killer end-to-end 场景 | 新增 8.2.1：spec decode + preemption 为主场景；指标改为 SLO 下 goodput |
+| 8 | 缺 killer end-to-end 场景 | 新增 8.2.1 主场景与 SLO goodput 指标（三轮修订后主场景改为 mixed/ragged，见附录 C） |
 | 9 | Stage 1 范围是可用时间的 2–3 倍 | 第十节砍半：一 artifact、一方案、一 bug 类；补充工作量现实检查 |
 | 10 | 缺 Plan B | 新增 10.1：checker/诊断工具独立成篇，并从第一周复用 instrumentation |
+
+## 附录 C：对 2026-10-22 第二轮独立 review 的逐条回应
+
+| # | 意见 | 处理 |
+|---|---|---|
+| 1 | 主场景与机制错配：spec decode 是 `k_dep` 场景，版本池解不了 | 8.2.1 改为 mixed/ragged 主场景、preemption 第二主场景、spec decode 降为 `k_dep` 边界案例；最终选择由 Gate 0 的 H/D 与残余 host 工作决定 |
+| 2 | 主 claim 与第一版 bet 不一致（单图多版本 vs exec 克隆） | 第三节明确"第一版克隆只作可行性，最终机制是单图多版本"，并规定写作纪律；Stage 1 同步修改 |
+| 3 | exec 克隆的显存/并发语义未经确认 | 新增 3.4.1：列出两种可能的语义与后果，规定 Gate 0 第一周半天最小实验，结论可能推翻 bet |
+| 4 | 叙事悖论：收益正比于被隐藏的 host 成本 | 1.4 新增悖论段；Gate 0 新增第 5 个阈值"残余不可图化 host 工作 ≥5% step time"；止损条件 7 |
+| 5 | Gate 0 四周预算不现实 | 改为 8–10 周（含 2 周缓冲），五类对照砍成两类；给出 4 周极限版的最小任务集 |
+| 6 | 缺少 surprise 的预注册 | 第九节新增 S1–S3 三个预注册假设；至少出现一个才具备论文价值 |
