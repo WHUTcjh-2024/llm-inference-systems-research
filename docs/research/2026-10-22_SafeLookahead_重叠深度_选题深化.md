@@ -488,6 +488,8 @@ Gate 0 只比较 1（async off/同步）与 5/6（`SetParams` 或 exec 克隆）
 - FlashInfer：`include/flashinfer/attention/scheduler.cuh`、`decode.py` 的 `plan()`；
 - SGLang（Stage 3）：`python/sglang/srt/layers/attention/flashinfer_backend.py`、`runner_backend_utils/breakable_cuda_graph/`。
 
+实验脚本：[experiments/gate0/](../../experiments/gate0/README.md)（A：exec 克隆语义；B：残余 host 工作基线；`run_all.sh` 一次会话跑完最小集）。
+
 ## 十、最小可发表单元与 venue
 
 **Stage 1（论文核心，范围已砍半）**：vLLM + FlashInfer + Qwen3-8B + A100 40GB；`k_res`/`k_dep` 归因；**plan ring + 单图多版本 ABI**（第一版用 exec 克隆做可行性对照，最终机制以 3.4.1 的结论为准）；1 类 bug 复现；**mixed/ragged 或 preemption 主场景**下的 SLO goodput。四种方案的完整对比降为补充实验。

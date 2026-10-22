@@ -7,6 +7,7 @@
 ## 从这里开始
 
 - [选题深化：Safe Lookahead](docs/research/2026-10-22_SafeLookahead_重叠深度_选题深化.md)：Gate 0 测量设计、CUDA Graph 设计空间、核心创新、单卡实验与止损。
+- [Gate 0 实验脚本](experiments/gate0/README.md)：exec 克隆语义 + 残余 host 工作基线，4–6 GPU 小时拿到 go/no-go。
 
 2026-10-21 的两份三方向文档已在收敛后移除；仍然有效的文献先例压缩在新文档第七节。
 

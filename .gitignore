@@ -15,3 +15,6 @@ __pycache__/
 *.json.gz
 *.log
 .env
+
+# Gate 0 raw experiment outputs
+experiments/gate0/**/results/
