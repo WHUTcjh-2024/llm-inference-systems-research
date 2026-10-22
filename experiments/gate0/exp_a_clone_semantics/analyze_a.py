@@ -86,16 +86,40 @@ def verdict(rows: dict[str, list[dict]]) -> str:
     )
 
 
+def external_verdict(rows: dict[str, list[dict]]) -> str:
+    shared = rows.get("shared_concurrent", [])
+    separate = rows.get("separate_concurrent", [])
+    if not shared or not separate:
+        return "Incomplete external-buffer control."
+    shared_alias = all(int(row["addr_same"]) for row in shared)
+    separate_distinct = all(not int(row["addr_same"]) for row in separate)
+    shared_races = sum(int(row["race"]) for row in shared)
+    separate_races = sum(int(row["race"]) for row in separate)
+    return (
+        "EXTERNAL CONTROL: captured pointer shared="
+        f"{shared_alias}, observed shared-buffer races={shared_races}/{len(shared)}; "
+        f"explicitly rebound buffer distinct={separate_distinct}, "
+        f"observed separate-buffer races={separate_races}/{len(separate)}. "
+        "Check an Nsight node timeline before claiming concurrent execution."
+    )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     args = ap.parse_args()
 
     rows = load(args.input)
-    for mode in ("serial", "concurrent"):
+    external = "shared_concurrent" in rows
+    modes = (
+        ("shared_concurrent", "separate_serial", "separate_concurrent")
+        if external
+        else ("serial", "concurrent")
+    )
+    for mode in modes:
         if mode in rows:
             summarize(mode, rows[mode])
-    print("\n" + verdict(rows))
+    print("\n" + (external_verdict(rows) if external else verdict(rows)))
 
 
 if __name__ == "__main__":

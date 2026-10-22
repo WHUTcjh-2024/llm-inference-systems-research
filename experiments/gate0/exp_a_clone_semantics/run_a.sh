@@ -15,21 +15,36 @@ ARCH="${ARCH:--arch=sm_90}"
 REPEATS="${REPEATS:-200}"
 SPIN="${SPIN:-50000000}"
 ITERS="${ITERS:-1048576}"
+PYTHON="${PYTHON:-python}"
 
-make clean all ARCH="$ARCH"
+make clean all clone_external ARCH="$ARCH"
 mkdir -p results
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
 CSV="results/exp_a_${STAMP}.csv"
 META="results/exp_a_${STAMP}.meta.txt"
 
-./clone_semantics \
+if ./clone_semantics \
   --iters "$ITERS" \
   --spin "$SPIN" \
   --repeats "$REPEATS" \
   --mode both \
-  2>"$META" | tee "$CSV"
+  >"$CSV" 2>"$META"; then
+  "$PYTHON" analyze_a.py --input "$CSV"
+else
+  status=$?
+  if [[ "$status" != "3" ]] ||
+     ! grep -q 'second_instantiation=not_supported' "$META"; then
+    cat "$META" >&2
+    exit "$status"
+  fi
+  echo "Graph allocation/free nodes forbid a second exec instance (CUDA API)."
+  cat "$META"
+fi
 
-echo "csv:  $CSV"
-echo "meta: $META"
-python analyze_a.py --input "$CSV"
+EXTERNAL="results/exp_a_external_${STAMP}.csv"
+./clone_external "$REPEATS" "$SPIN" "$ITERS" >"$EXTERNAL"
+"$PYTHON" analyze_a.py --input "$EXTERNAL"
+
+echo "graph-memory metadata: $META"
+echo "external control:     $EXTERNAL"

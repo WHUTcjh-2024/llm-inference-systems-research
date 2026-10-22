@@ -20,6 +20,11 @@ WORKLOAD="${WORKLOAD:-mixed}"
 ASYNC="${ASYNC:-default}"
 NUM_PROMPTS="${NUM_PROMPTS:-64}"
 OUTPUT_LEN="${OUTPUT_LEN:-128}"
+WARMUP_FULL="${WARMUP_FULL:-1}"
+PYTHON="${PYTHON:-python}"
+if [[ "$PYTHON" == */* ]]; then
+  export PATH="$(dirname "$PYTHON"):$PATH"
+fi
 
 if [[ "$WORKLOAD" == "preemption" && -z "${GPU_MEM:-}" ]]; then
   GPU_MEM=0.60
@@ -39,9 +44,13 @@ ARGS=(
   --out "$OUT"
 )
 
+if [[ "$WARMUP_FULL" == "1" ]]; then
+  ARGS+=(--warmup-full)
+fi
+
 if [[ "$WORKLOAD" == "mixed" ]]; then
   ARGS+=(--chunked-prefill)
 fi
 
-python bench_b.py "${ARGS[@]}" "$@"
-python analyze_b.py --input "$OUT" --out "${OUT%.csv}.summary.csv"
+"$PYTHON" bench_b.py "${ARGS[@]}" "$@"
+"$PYTHON" analyze_b.py --input "$OUT" --out "${OUT%.csv}.summary.csv"

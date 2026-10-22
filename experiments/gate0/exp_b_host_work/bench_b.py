@@ -15,8 +15,11 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import sys
+import time
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,43 +52,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--nvtx", action="store_true")
     p.add_argument("--no-device-events", action="store_true")
     p.add_argument("--warmup", type=int, default=2)
+    p.add_argument(
+        "--warmup-full",
+        action="store_true",
+        help="run the complete workload once before recording",
+    )
     p.add_argument("--trust-remote-code", action="store_true")
     p.add_argument("--seed", type=int, default=0)
     return p.parse_args()
-
-
-def build_llm(LLM, kwargs: dict):
-    """Retry without optional kwargs that this vLLM version rejects."""
-    optional = [
-        "async_scheduling",
-        "enable_chunked_prefill",
-        "distributed_executor_backend",
-        "max_model_len",
-        "trust_remote_code",
-    ]
-    while True:
-        try:
-            return LLM(**kwargs)
-        except (TypeError, ValueError) as exc:
-            msg = str(exc)
-            removed = None
-            for key in optional:
-                if key in kwargs and key in msg:
-                    removed = key
-                    break
-            if removed is None:
-                for key in reversed(optional):
-                    if key in kwargs:
-                        removed = key
-                        break
-            if removed is None:
-                raise
-            print(
-                f"[warn] LLM() rejected {removed}; retrying without it "
-                f"({msg})",
-                file=sys.stderr,
-            )
-            kwargs.pop(removed)
 
 
 def main() -> None:
@@ -94,10 +68,8 @@ def main() -> None:
     # Must be set before importing vllm. The experiment requires the engine
     # to run in this process; otherwise the monkey-patches never see worker
     # calls and the CSV stays empty.
-    os.environ["VLLM_USE_V1"] = "1"
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-    if args.attn_backend:
-        os.environ["VLLM_ATTENTION_BACKEND"] = args.attn_backend
+    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
 
     from vllm import LLM, SamplingParams
 
@@ -109,13 +81,19 @@ def main() -> None:
         nvtx=args.nvtx,
         device_events=not args.no_device_events,
     )
-    for line in inst.patch_all(rec):
+    patch_status = inst.patch_all(rec)
+    for line in patch_status:
         print(f"[patch] {line}", file=sys.stderr)
+    for phase in ("schedule", "execute", "attn_metadata", "flashinfer_metadata"):
+        if not any(line.startswith(f"{phase}: patched ") for line in patch_status):
+            rec.finalize()
+            raise RuntimeError(f"Required instrumentation phase is missing: {phase}")
 
     kwargs = dict(
         model=args.model,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_num_seqs=args.max_num_seqs,
+        enable_prefix_caching=False,
     )
     if args.trust_remote_code:
         kwargs["trust_remote_code"] = True
@@ -127,8 +105,29 @@ def main() -> None:
         kwargs["max_model_len"] = args.max_model_len
     if args.async_scheduling != "default":
         kwargs["async_scheduling"] = args.async_scheduling == "on"
+    if args.attn_backend:
+        kwargs["attention_backend"] = args.attn_backend
 
-    llm = build_llm(LLM, kwargs)
+    # A rejected experiment setting must fail rather than silently changing
+    # the async/chunked-prefill control group.
+    llm = LLM(**kwargs)
+    config = llm.llm_engine.vllm_config
+    actual_async = config.scheduler_config.async_scheduling
+    print(
+        f"[config] async_scheduling={actual_async} "
+        f"executor={config.parallel_config.distributed_executor_backend} "
+        f"runner_v2={config.use_v2_model_runner} "
+        f"chunked_prefill={config.scheduler_config.enable_chunked_prefill} "
+        f"attn_backend={config.attention_config.backend} "
+        f"prefix_caching={config.cache_config.enable_prefix_caching}",
+        file=sys.stderr,
+    )
+    if not config.use_v2_model_runner:
+        raise RuntimeError("vLLM did not select the instrumented V2 model runner")
+    if args.async_scheduling != "default":
+        requested_async = args.async_scheduling == "on"
+        if actual_async != requested_async:
+            raise RuntimeError("vLLM did not apply the requested async setting")
 
     prompts = build_prompts(
         args.workload, args.num_prompts, args.prompt_len, args.seed
@@ -139,7 +138,10 @@ def main() -> None:
         ignore_eos=True,
     )
 
-    if args.warmup > 0:
+    if args.warmup_full:
+        print("[warmup] complete workload", file=sys.stderr)
+        llm.generate(prompts, params, use_tqdm=False)
+    elif args.warmup > 0:
         warm = prompts[: min(args.warmup, len(prompts))]
         llm.generate(
             warm,
@@ -147,17 +149,36 @@ def main() -> None:
             use_tqdm=False,
         )
 
+    import torch
+
     rec.start()
-    llm.generate(prompts, params, use_tqdm=True)
-    rec.finalize()
+    t0 = time.perf_counter()
+    torch.cuda.nvtx.range_push("gate0:measure")
+    try:
+        outputs = llm.generate(prompts, params, use_tqdm=True)
+    finally:
+        torch.cuda.nvtx.range_pop()
+        rec.finalize()
+    elapsed = time.perf_counter() - t0
+    generated_tokens = sum(len(out.outputs[0].token_ids) for out in outputs)
+    output_digest = hashlib.sha256(
+        json.dumps(
+            [out.outputs[0].token_ids for out in outputs],
+            separators=(",", ":"),
+        ).encode("ascii")
+    ).hexdigest()
+    print(f"[output] requests={len(outputs)} sha256={output_digest}", file=sys.stderr)
+    print(
+        f"[throughput] elapsed_s={elapsed:.6f} "
+        f"generated_tokens={generated_tokens} "
+        f"output_tokens_per_s={generated_tokens / elapsed:.3f}",
+        file=sys.stderr,
+    )
 
     print(f"[done] rows={rec.rows} csv={args.out}", file=sys.stderr)
     if rec.rows == 0:
-        print(
-            "[warn] no rows recorded. The engine likely ran in a separate "
-            "process. Keep VLLM_ENABLE_V1_MULTIPROCESSING=0, or check the "
-            "installed vLLM version for an in-process engine option.",
-            file=sys.stderr,
+        raise RuntimeError(
+            "No host rows recorded. Check the engine process and patch status."
         )
 
 

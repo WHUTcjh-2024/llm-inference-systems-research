@@ -10,11 +10,13 @@ vLLM commit：
 
 | 项目 | 结果 |
 |---|---|
+| 图含 allocation/free 节点时第二次 instantiate | |
 | 两次 instantiate 的 workspace 地址是否相同 | |
 | 并发 replay 的 race 率 | |
 | e1 显存增量 | |
 | e2 显存增量 | |
 | serial / concurrent 的 wall time | |
+| Nsight 节点时间线是否证实两条 stream 重叠 | |
 | 结论：克隆能否服务 `k` 个 in-flight step | |
 
 ## B. 残余 host 工作
@@ -26,8 +28,11 @@ vLLM commit：
 | mixed | off | | | | | |
 | preemption | on | | | | | |
 
-如果 device time 为 0（CUDA event 没打到 worker stream），改填 `H_res/period`，
-并在备注里说明分母是 scheduler cadence。
+如果无法准确测到 device time，暂不判定 `H_res/step_time` 门槛。
+`H_res/period` 只能作为辅助描述，并注明分母是 scheduler cadence。
+
+当前探索性采集器的 `device_window` 和 `k_host_proxy` 不能直接填入 `D`、
+`k_actual`；`H_res` 也须经 CUDA/NVTX 时间线确认不可图化部分后才能填。
 
 ### 归因
 

@@ -4,7 +4,8 @@ Design goals:
   - no vLLM forks: monkey-patch class methods before the engine starts;
   - fail soft: phases that this vLLM version does not expose are reported,
     not fatal;
-  - one CSV: host phase durations, device time, and k_actual per step.
+  - one CSV: host phase durations, a CUDA stream timing window, and a
+    schedule-to-execute host backlog proxy per step.
 
 This module must be imported *in the process that runs the engine*. The
 bench script sets VLLM_ENABLE_V1_MULTIPROCESSING=0 so the engine runs in
@@ -15,7 +16,8 @@ Phase hierarchy (parent column):
     block_alloc
   execute
     prepare
-      attn_metadata
+    attn_metadata
+      flashinfer_metadata
     sample
   postprocess
 
@@ -48,20 +50,34 @@ PHASES: list[tuple[str, str, list[tuple[str, str, str]]]] = [
     (
         "execute",
         "",
-        [("vllm.v1.worker.gpu_model_runner", "GPUModelRunner", "execute_model")],
+        [
+            ("vllm.v1.worker.gpu.model_runner", "GPUModelRunner", "execute_model"),
+            ("vllm.v1.worker.gpu_model_runner", "GPUModelRunner", "execute_model"),
+        ],
     ),
     (
         "prepare",
         "execute",
         [
+            ("vllm.v1.worker.gpu.model_runner", "GPUModelRunner", "prepare_inputs"),
             ("vllm.v1.worker.gpu_model_runner", "GPUModelRunner", "_prepare_inputs"),
             ("vllm.v1.worker.gpu_model_runner", "GPUModelRunner", "prepare_inputs"),
         ],
     ),
     (
         "attn_metadata",
-        "prepare",
+        "execute",
         [
+            (
+                "vllm.v1.worker.gpu.model_states.default",
+                "DefaultModelState",
+                "prepare_attn",
+            ),
+            (
+                "vllm.v1.worker.gpu_model_runner",
+                "GPUModelRunner",
+                "_build_attention_metadata",
+            ),
             (
                 "vllm.v1.worker.gpu_model_runner",
                 "GPUModelRunner",
@@ -83,9 +99,21 @@ PHASES: list[tuple[str, str, list[tuple[str, str, str]]]] = [
         ],
     ),
     (
+        "flashinfer_metadata",
+        "attn_metadata",
+        [
+            (
+                "vllm.v1.attention.backends.flashinfer",
+                "FlashInferMetadataBuilder",
+                "build",
+            )
+        ],
+    ),
+    (
         "sample",
         "execute",
         [
+            ("vllm.v1.worker.gpu.model_runner", "GPUModelRunner", "sample"),
             ("vllm.v1.worker.gpu_model_runner", "GPUModelRunner", "_sample"),
             ("vllm.v1.worker.gpu_model_runner", "GPUModelRunner", "sample"),
         ],
@@ -160,7 +188,14 @@ class Recorder:
                     except Exception:
                         continue
                     self._write_locked(
-                        step, "device", "", 0, 0, int(ms * 1e6), "device", 0
+                        step,
+                        "device_window",
+                        "",
+                        0,
+                        0,
+                        int(ms * 1e6),
+                        "device_window",
+                        0,
                     )
                 self._events.clear()
 
@@ -193,7 +228,7 @@ class Recorder:
             self._executed += 1
             if self._pending:
                 self._pending.popleft()
-            self._write_locked(step, "k_actual", "", 0, 0, 0, "k", k_before)
+            self._write_locked(step, "k_host_proxy", "", 0, 0, 0, "k", k_before)
 
     # -- writing -------------------------------------------------------
     def add_host(

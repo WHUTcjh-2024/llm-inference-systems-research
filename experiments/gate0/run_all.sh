@@ -20,6 +20,9 @@ WORKLOAD=uniform ./exp_b_host_work/run_b.sh
 echo "=== Experiment B: mixed/ragged ==="
 WORKLOAD=mixed ./exp_b_host_work/run_b.sh
 
+echo "=== Experiment B: mixed/ragged, async off ==="
+ASYNC=off WORKLOAD=mixed ./exp_b_host_work/run_b.sh
+
 if [[ "${WITH_PREEMPTION:-0}" == "1" ]]; then
   echo "=== Experiment B: preemption churn ==="
   WORKLOAD=preemption NUM_PROMPTS=128 ./exp_b_host_work/run_b.sh

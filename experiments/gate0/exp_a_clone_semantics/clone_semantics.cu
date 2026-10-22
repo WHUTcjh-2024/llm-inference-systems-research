@@ -132,12 +132,27 @@ int main(int argc, char** argv) {
 #if CUDART_VERSION >= 12000
     CUDA_CHECK(cudaGraphInstantiate(&e1, graph, 0));
     CUDA_CHECK(cudaMemGetInfo(&free_after_e1, &total));
-    CUDA_CHECK(cudaGraphInstantiate(&e2, graph, 0));
+    const cudaError_t second_status = cudaGraphInstantiate(&e2, graph, 0);
 #else
     CUDA_CHECK(cudaGraphInstantiate(&e1, graph, nullptr, nullptr, 0));
     CUDA_CHECK(cudaMemGetInfo(&free_after_e1, &total));
-    CUDA_CHECK(cudaGraphInstantiate(&e2, graph, nullptr, nullptr, 0));
+    const cudaError_t second_status =
+        cudaGraphInstantiate(&e2, graph, nullptr, nullptr, 0);
 #endif
+    if (second_status == cudaErrorNotSupported) {
+        std::fprintf(stderr,
+                     "meta: second_instantiation=not_supported "
+                     "graph_memory_nodes=1\n");
+        CUDA_CHECK(cudaGraphExecDestroy(e1));
+        CUDA_CHECK(cudaGraphDestroy(graph));
+        CUDA_CHECK(cudaStreamDestroy(s_capture));
+        CUDA_CHECK(cudaStreamDestroy(s1));
+        CUDA_CHECK(cudaStreamDestroy(s2));
+        CUDA_CHECK(cudaFree(counter));
+        CUDA_CHECK(cudaFree(out));
+        return 3;
+    }
+    CUDA_CHECK(second_status);
     CUDA_CHECK(cudaMemGetInfo(&free_after_e2, &total));
 
     std::fprintf(stderr,
