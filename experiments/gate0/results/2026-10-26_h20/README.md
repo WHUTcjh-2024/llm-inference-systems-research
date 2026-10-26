@@ -3,6 +3,8 @@
 Status: **in progress**. Experiment A is complete. Experiment B contains one
 valid smoke run; the formal workload matrix and Nsight validation are pending
 because the instance was rebooted into no-GPU mode before they could run.
+`week1_report.md` is a draft that records the completed evidence and marks
+every decision-relevant gap as pending.
 
 ## Environment (recorded during the GPU boot)
 
