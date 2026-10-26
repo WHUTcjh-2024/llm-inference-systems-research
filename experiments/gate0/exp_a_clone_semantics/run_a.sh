@@ -43,8 +43,10 @@ else
 fi
 
 EXTERNAL="results/exp_a_external_${STAMP}.csv"
-./clone_external "$REPEATS" "$SPIN" "$ITERS" >"$EXTERNAL"
+EXTERNAL_META="results/exp_a_external_${STAMP}.meta.txt"
+./clone_external "$REPEATS" "$SPIN" "$ITERS" >"$EXTERNAL" 2>"$EXTERNAL_META"
 "$PYTHON" analyze_a.py --input "$EXTERNAL"
 
 echo "graph-memory metadata: $META"
 echo "external control:     $EXTERNAL"
+echo "external metadata:    $EXTERNAL_META"

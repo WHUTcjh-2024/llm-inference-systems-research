@@ -38,10 +38,14 @@ int main(int argc, char** argv) {
     const size_t bytes = static_cast<size_t>(length) * sizeof(int);
     int *workspace1 = nullptr, *workspace2 = nullptr, *counter = nullptr;
     unsigned long long* output = nullptr;
+    size_t free_start = 0, total = 0;
+    CHECK(cudaMemGetInfo(&free_start, &total));
     CHECK(cudaMalloc(reinterpret_cast<void**>(&workspace1), bytes));
     CHECK(cudaMalloc(reinterpret_cast<void**>(&workspace2), bytes));
     CHECK(cudaMalloc(reinterpret_cast<void**>(&counter), sizeof(int)));
     CHECK(cudaMalloc(reinterpret_cast<void**>(&output), 4 * sizeof(*output)));
+    size_t free_after_alloc = 0;
+    CHECK(cudaMemGetInfo(&free_after_alloc, &total));
 
     cudaStream_t stream1, stream2;
     CHECK(cudaStreamCreate(&stream1));
@@ -61,6 +65,41 @@ int main(int argc, char** argv) {
     cudaGraphExec_t exec1, exec2;
     CHECK(cudaGraphInstantiate(&exec1, graph, 0));
     CHECK(cudaGraphInstantiate(&exec2, graph, 0));
+    size_t free_after_instantiate = 0;
+    CHECK(cudaMemGetInfo(&free_after_instantiate, &total));
+
+    // First replay of each exec separately: a graph exec may lazily upload
+    // device-side backing memory on its first launch rather than at
+    // instantiate time. Attribute that cost per exec, not to the first
+    // concurrent pair.
+    CHECK(cudaMemset(counter, 0, sizeof(int)));
+    CHECK(cudaMemset(output, 0, 4 * sizeof(*output)));
+    CHECK(cudaGraphLaunch(exec1, stream1));
+    CHECK(cudaStreamSynchronize(stream1));
+    size_t free_after_replay1 = 0;
+    CHECK(cudaMemGetInfo(&free_after_replay1, &total));
+    CHECK(cudaMemset(counter, 0, sizeof(int)));
+    CHECK(cudaMemset(output, 0, 4 * sizeof(*output)));
+    CHECK(cudaGraphLaunch(exec2, stream2));
+    CHECK(cudaStreamSynchronize(stream2));
+    size_t free_after_replay2 = 0;
+    CHECK(cudaMemGetInfo(&free_after_replay2, &total));
+
+    std::fprintf(
+        stderr,
+        "meta: bytes_per_ws=%zu free_start=%.2fMB after_alloc=%.2fMB "
+        "after_instantiate=%.2fMB after_first_replay_e1=%.2fMB "
+        "after_first_replay_e2=%.2fMB "
+        "delta_alloc=%.2fMB delta_instantiate=%.2fMB "
+        "delta_replay_e1=%.2fMB delta_replay_e2=%.2fMB\n",
+        bytes, free_start / 1048576.0, free_after_alloc / 1048576.0,
+        free_after_instantiate / 1048576.0, free_after_replay1 / 1048576.0,
+        free_after_replay2 / 1048576.0,
+        (free_start - free_after_alloc) / 1048576.0,
+        (free_after_alloc - free_after_instantiate) / 1048576.0,
+        (free_after_instantiate - free_after_replay1) / 1048576.0,
+        (free_after_replay1 - free_after_replay2) / 1048576.0);
+
 
     auto run = [&](const char* mode, bool concurrent) {
         for (int repeat = 0; repeat < repeats; ++repeat) {

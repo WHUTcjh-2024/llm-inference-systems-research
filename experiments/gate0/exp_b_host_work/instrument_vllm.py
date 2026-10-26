@@ -129,6 +129,43 @@ PHASES: list[tuple[str, str, list[tuple[str, str, str]]]] = [
             )
         ],
     ),
+    (
+        "engine_step",
+        "",
+        [("vllm.v1.engine.core", "EngineCore", "step")],
+    ),
+    (
+        "engine_step_bq",
+        "",
+        [("vllm.v1.engine.core", "EngineCore", "step_with_batch_queue")],
+    ),
+    (
+        "engine_wait",
+        "engine_step",
+        [
+            (
+                "vllm.v1.executor.uniproc_executor",
+                "AsyncOutputFuture",
+                "result",
+            )
+        ],
+    ),
+    (
+        "engine_update",
+        "engine_step",
+        [
+            (
+                "vllm.v1.core.sched.scheduler",
+                "Scheduler",
+                "update_from_output",
+            )
+        ],
+    ),
+    (
+        "graph_replay",
+        "execute",
+        [("torch.cuda", "CUDAGraph", "replay")],
+    ),
 ]
 
 FIELDS = [
@@ -164,7 +201,10 @@ class Recorder:
         self._executed = 0
         self._pending: deque[int] = deque()
         self._events: list[tuple[int, object, object]] = []
+        self._buffer: list[dict] = []
         self._rows = 0
+        self._epoch = None
+        self._epoch_host_ns = 0
 
     # -- lifecycle -----------------------------------------------------
     def start(self) -> None:
@@ -174,6 +214,13 @@ class Recorder:
             self._executed = 0
             self._pending.clear()
             self._events.clear()
+            self._epoch_host_ns = time.perf_counter_ns()
+            if self.device_events and torch is not None:
+                self._epoch = torch.cuda.Event(enable_timing=True)
+                self._epoch.record()
+                self._write_locked(
+                    0, "epoch", "", 0, 0, 0, "epoch", self._epoch_host_ns
+                )
 
     def finalize(self) -> None:
         with self._lock:
@@ -184,22 +231,26 @@ class Recorder:
             with self._lock:
                 for step, ev0, ev1 in self._events:
                     try:
-                        ms = ev0.elapsed_time(ev1)
+                        start_ms = self._epoch.elapsed_time(ev0)
+                        end_ms = self._epoch.elapsed_time(ev1)
                     except Exception:
                         continue
                     self._write_locked(
                         step,
                         "device_window",
                         "",
-                        0,
-                        0,
-                        int(ms * 1e6),
+                        int(start_ms * 1e3),
+                        int(end_ms * 1e3),
+                        int((end_ms - start_ms) * 1e3),
                         "device_window",
                         0,
                     )
                 self._events.clear()
 
         with self._lock:
+            for entry in self._buffer:
+                self._writer.writerow(entry)
+            self._buffer.clear()
             self._fh.flush()
             self._fh.close()
 
@@ -223,12 +274,50 @@ class Recorder:
         with self._lock:
             return self._scheduled - self._executed
 
+    def last_step(self) -> int:
+        with self._lock:
+            return max(1, self._scheduled)
+
     def finish_execute(self, step: int, k_before: int) -> None:
         with self._lock:
             self._executed += 1
             if self._pending:
                 self._pending.popleft()
             self._write_locked(step, "k_host_proxy", "", 0, 0, 0, "k", k_before)
+
+    def add_resource(self, step: int, name: str, value: int) -> None:
+        with self._lock:
+            if not self._enabled:
+                return
+            self._write_locked(step, name, "", 0, 0, 0, "resource", value)
+
+    def record_scheduler_state(self, step: int, scheduler, output) -> None:
+        """Snapshot what the scheduler was constrained by before this step."""
+        def safe(fn):
+            try:
+                return int(fn())
+            except Exception:
+                return -1
+
+        waiting = safe(lambda: len(scheduler.waiting))
+        running = safe(lambda: len(scheduler.running))
+        free_blocks = safe(
+            lambda: scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+        )
+        scheduled = safe(lambda: output.total_num_scheduled_tokens)
+        preemptions = safe(
+            lambda: sum(
+                1 for request in scheduler.running if request.num_preemptions > 0
+            )
+        )
+        for name, value in (
+            ("waiting", waiting),
+            ("running", running),
+            ("free_blocks", free_blocks),
+            ("scheduled_tokens", scheduled),
+            ("running_preempted_ever", preemptions),
+        ):
+            self.add_resource(step, name, value)
 
     # -- writing -------------------------------------------------------
     def add_host(
@@ -263,7 +352,7 @@ class Recorder:
         kind: str,
         value: int,
     ) -> None:
-        self._writer.writerow(
+        self._buffer.append(
             {
                 "step": step,
                 "phase": phase,
@@ -289,6 +378,8 @@ def _wrap(original, phase: str, parent: str, rec: Recorder):
 
         if phase == "schedule":
             step = rec.start_step()
+        elif phase in ("engine_step", "engine_step_bq"):
+            step = 0  # resolved to the step scheduled inside this call
         else:
             step = rec.current_step()
 
@@ -304,8 +395,10 @@ def _wrap(original, phase: str, parent: str, rec: Recorder):
             torch.cuda.nvtx.range_push(f"gate0:{phase}")
 
         t0 = time.perf_counter_ns()
+        result = None
         try:
-            return original(*args, **kwargs)
+            result = original(*args, **kwargs)
+            return result
         finally:
             t1 = time.perf_counter_ns()
             if rec.nvtx:
@@ -313,9 +406,13 @@ def _wrap(original, phase: str, parent: str, rec: Recorder):
             if ev1 is not None:
                 ev1.record()
                 rec.add_device_event(step, ev0, ev1)
+            if phase in ("engine_step", "engine_step_bq"):
+                step = rec.last_step()
             rec.add_host(step, phase, parent, t0, t1)
             if phase == "execute":
                 rec.finish_execute(step, k_before)
+            if phase == "schedule" and result is not None:
+                rec.record_scheduler_state(step, args[0], result)
 
     wrapper._gate0_wrapped = True  # type: ignore[attr-defined]
     return wrapper

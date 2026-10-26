@@ -33,6 +33,7 @@ fi
 mkdir -p results
 STAMP="$(date +%Y%m%d_%H%M%S)"
 OUT="results/exp_b_${WORKLOAD}_async-${ASYNC}_${STAMP}.csv"
+LOG="results/exp_b_${WORKLOAD}_async-${ASYNC}_${STAMP}.log"
 
 ARGS=(
   --model "$MODEL"
@@ -52,5 +53,5 @@ if [[ "$WORKLOAD" == "mixed" ]]; then
   ARGS+=(--chunked-prefill)
 fi
 
-"$PYTHON" bench_b.py "${ARGS[@]}" "$@"
-"$PYTHON" analyze_b.py --input "$OUT" --out "${OUT%.csv}.summary.csv"
+"$PYTHON" bench_b.py "${ARGS[@]}" "$@" 2>&1 | tee "$LOG"
+"$PYTHON" analyze_b.py --input "$OUT" --out "${OUT%.csv}.summary.csv" 2>&1 | tee -a "$LOG"
