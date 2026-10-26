@@ -54,9 +54,13 @@ prompts) after the unit fix. It validates the instrumentation; it is not a
 formal Gate 0 sample:
 
 - `D_step` median 6.211 ms; `H_res` median 1.405 ms; `H_res/D_step` median
-  22.60% (p95 39.62%); `k_actual` median/max 2; GPU inter-step gap ≈0.4 µs.
-- The first step is a 4352-token chunked prefill (`D_step` 462.9 ms); the
-  medians above are dominated by decode steps.
+  22.60% (p95 39.62%); `k_actual` median/max 2; GPU inter-step gap ≈0.4 µs
+  (0.64% of the measurement span). The host spends ~93% of EngineCore
+  iteration wall time blocked in `AsyncOutputFuture.result()` (decode steady
+  state ≈79%), i.e. waiting for the sampled-token D2H copy.
+- The first step is a 4352-token chunked prefill (`D_step` 462.9 ms,
+  `H_res/D_step` 4.7%); the medians above are decode-only
+  (`scheduled_tokens <= 8`).
 
 `exp_b/invalid_unitbug/` — the first smoke run, preserved. Its device
 timestamps were stored with a 1000× unit error (`elapsed_time` returns ms, the
@@ -72,5 +76,22 @@ files are invalid; they are kept only as a failure record.
 - Clean (non-instrumented) control with engine multiprocessing on/off.
 - `k_res` vs `k_dep` attribution and the Week 1 decision report.
 
+## Next GPU session
+
+The instance was rebooted into no-GPU mode, so the formal matrix has not run.
+One command runs the remaining measurement set:
+
+```bash
+cd experiments/gate0/exp_b_host_work
+MODEL=/root/autodl-tmp/models/Qwen3-8B-hf \
+PYTHON=/root/autodl-tmp/gate0-env/bin/python \
+REPEATS=3 WITH_NSYS=1 ./run_formal.sh
+```
+
+It runs uniform/mixed/mixed-async-off three times each, the clean
+multiprocessing control, and Nsight traces, then writes
+`results/formal_aggregate.csv`.
+
 Binary profiler traces (`*.nsys-rep`, `*.sqlite`) remain local per the
 repository data policy; their summaries are committed.
+

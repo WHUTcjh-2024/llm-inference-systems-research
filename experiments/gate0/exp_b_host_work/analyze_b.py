@@ -57,7 +57,7 @@ RESOURCES = (
 )
 FIELDS = (
     "step",
-    *PHASES,
+    *(f"{phase}_us" for phase in PHASES),
     "H_busy_us",
     "H_res_us",
     "unaccounted_us",
@@ -161,6 +161,7 @@ def main() -> None:
         busy = max(0, duration - wait)
         entry = {
             "step": int(row["step"]),
+            "source": row["phase"],
             "start": start,
             "end": end,
             "H_busy_us": busy / 1e3,
@@ -223,6 +224,7 @@ def main() -> None:
         row = {"step": s}
         for phase in PHASES:
             row[f"{phase}_us"] = entry.get(f"{phase}_us", 0.0)
+        row[f"{entry['source']}_us"] = entry["engine_total_us"]
         row["engine_wait_us"] = entry["engine_wait_us"]
         row["H_busy_us"] = entry["H_busy_us"]
         row["H_res_us"] = entry["H_busy_us"]
