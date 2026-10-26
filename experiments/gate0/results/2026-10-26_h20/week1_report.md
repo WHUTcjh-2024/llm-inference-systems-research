@@ -103,6 +103,20 @@ Python/引擎胶水；单次 smoke 的水平只作方向性参考。
 k_res/k_dep attribution**。smoke 支持“k_dep 主导、k_res 未观察到”，但
 样本只有一次、负载只有 8 条请求，不能替代正式矩阵。
 
+源码复核（vLLM 0.29.0 wheel，行号可能随版本变化）：
+
+- `vllm/config/vllm.py:559` `max_concurrent_batches`：async scheduling +
+  V2 runner 时返回 `pp_size + 1`，单卡即 2；async off 时为 `pp_size = 1`。
+- `vllm/v1/engine/core.py:638` `step_with_batch_queue`：队列未满时先
+  schedule/execute 并直接返回；队列满时才 `future.result()` 阻塞。
+- `vllm/v1/executor/uniproc_executor.py:32` `AsyncOutputFuture.result`
+  调用 `AsyncOutput.get_output()`。
+- `vllm/v1/worker/gpu/async_utils.py:167` `AsyncOutput.get_output()` 先
+  `copy_event.synchronize()`，等待 sampled-token 的异步 D2H 完成。
+
+这四点是“k 的 2 步上限 + 每步等待采样 token”这一初步归因的来源；它们解释
+机制，不替代正式测量。
+
 需要特别记录的反直觉点：decode 的 `H_res/D_step` 约 22.6%，高于 5%
 门槛；但 GPU 步间空档只有 0.64%。这说明 k=2 已经基本把 host 工作藏住，
 “残余 host 工作占比大”与“增加 k 能带来收益”不是同一件事。正式矩阵要

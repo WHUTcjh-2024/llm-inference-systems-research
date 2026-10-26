@@ -99,12 +99,15 @@ def main() -> None:
     tpot_ms = []
     for out in outputs:
         metrics = getattr(out, "metrics", None)
-        if metrics is not None and len(out.outputs[0].token_ids) > 1:
-            tpot_ms.append(
-                (metrics.finished_time - metrics.first_token_time)
-                / (len(out.outputs[0].token_ids) - 1)
-                * 1e3
-            )
+        if metrics is None or len(out.outputs[0].token_ids) <= 1:
+            continue
+        first = getattr(metrics, "first_token_time", None)
+        finished = getattr(metrics, "finished_time", None)
+        if first is None or finished is None:
+            continue
+        tpot_ms.append(
+            (finished - first) / (len(out.outputs[0].token_ids) - 1) * 1e3
+        )
     print(
         f"[result] elapsed_s={elapsed:.6f} requests={len(outputs)} "
         f"generated_tokens={generated} throughput={generated / elapsed:.3f} "
