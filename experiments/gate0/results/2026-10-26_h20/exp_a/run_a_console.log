@@ -1,0 +1,28 @@
+rm -f clone_semantics clone_external
+nvcc -O2 -lineinfo -arch=sm_90 clone_semantics.cu -o clone_semantics
+nvcc -O2 -lineinfo -arch=sm_90 clone_external.cu -o clone_external
+Graph allocation/free nodes forbid a second exec instance (CUDA API).
+meta: second_instantiation=not_supported graph_memory_nodes=1
+
+[shared_concurrent] n=200
+  workspace address equal: 200/200 (100.0%)
+  runs with corruption:    200/200 (100.0%)
+  total mismatched ints:   bad0=209715200 bad1=0
+  wall_ms: median=18.322 p95=18.327 min=18.318
+
+[separate_serial] n=200
+  workspace address equal: 0/200 (0.0%)
+  runs with corruption:    0/200 (0.0%)
+  total mismatched ints:   bad0=0 bad1=0
+  wall_ms: median=36.641 p95=36.665 min=36.615
+
+[separate_concurrent] n=200
+  workspace address equal: 0/200 (0.0%)
+  runs with corruption:    0/200 (0.0%)
+  total mismatched ints:   bad0=0 bad1=0
+  wall_ms: median=18.322 p95=18.330 min=18.311
+
+EXTERNAL CONTROL: captured pointer shared=True, observed shared-buffer races=200/200; explicitly rebound buffer distinct=True, observed separate-buffer races=0/200. Check an Nsight node timeline before claiming concurrent execution.
+graph-memory metadata: results/exp_a_20261026_011239.meta.txt
+external control:     results/exp_a_external_20261026_011239.csv
+external metadata:    results/exp_a_external_20261026_011239.meta.txt

@@ -1,0 +1,1 @@
+meta: bytes_per_ws=4194304 free_start=97029.62MB after_alloc=97019.62MB after_instantiate=97017.62MB after_first_replay_e1=97017.62MB after_first_replay_e2=97017.62MB delta_alloc=10.00MB delta_instantiate=2.00MB delta_replay_e1=0.00MB delta_replay_e2=0.00MB

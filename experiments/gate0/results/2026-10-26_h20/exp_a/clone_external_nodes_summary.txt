@@ -1,0 +1,7 @@
+Experiment A node-level Nsight timeline summary
+trace: clone_external_nodes.nsys-rep (20 repeats, spin=5,000,000, iters=1,048,576)
+kernels=122
+warmup_e1_e2: n=2 kernel_dur_median_ms=18.302 span_ms=36.662 overlapping_pairs=0/1 max_overlap_ms=0.000 streams=[13, 14]
+shared_concurrent: n=40 kernel_dur_median_ms=18.310 span_ms=367.234 overlapping_pairs=20/20 max_overlap_ms=18.310 streams=[13, 14]
+separate_serial: n=40 kernel_dur_median_ms=18.319 span_ms=734.293 overlapping_pairs=0/20 max_overlap_ms=0.000 streams=[13]
+separate_concurrent: n=40 kernel_dur_median_ms=18.308 span_ms=368.669 overlapping_pairs=20/20 max_overlap_ms=18.311 streams=[13, 14]

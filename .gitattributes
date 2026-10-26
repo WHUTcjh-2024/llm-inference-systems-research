@@ -4,3 +4,6 @@
 *.md text eol=lf
 *.cu text eol=lf
 Makefile text eol=lf
+*.csv text eol=lf
+*.log text eol=lf
+*.txt text eol=lf

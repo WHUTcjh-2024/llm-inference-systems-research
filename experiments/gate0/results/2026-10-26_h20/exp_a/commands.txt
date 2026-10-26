@@ -1,0 +1,29 @@
+Experiment A commands (NVIDIA H20, compute capability 9.0)
+
+Detected compute capability:
+  nvidia-smi --query-gpu=name,compute_cap,memory.total,driver_version --format=csv
+  -> NVIDIA H20, 9.0, 97871 MiB, 580.65.06
+
+Build and run:
+  cd experiments/gate0/exp_a_clone_semantics
+  export PATH=/usr/local/cuda/bin:$PATH
+  ARCH=-arch=sm_90 REPEATS=200 SPIN=5000000 ITERS=1048576 bash ./run_a.sh
+
+The script ran:
+  nvcc -O2 -lineinfo -arch=sm_90 clone_semantics.cu -o clone_semantics
+  nvcc -O2 -lineinfo -arch=sm_90 clone_external.cu -o clone_external
+  ./clone_semantics --iters 1048576 --spin 5000000 --repeats 200 --mode both
+  ./clone_external 200 5000000 1048576
+
+Nsight node-level check:
+  nsys profile --force-overwrite=true --trace=cuda,nvtx --cuda-graph-trace=node \
+    --sample=none --cpuctxsw=none --output=results/clone_external_nodes \
+    ./clone_external 20 5000000 1048576
+  nsys export --type sqlite --force-overwrite=true \
+    --output=results/clone_external_nodes.sqlite results/clone_external_nodes.nsys-rep
+
+Outputs:
+  exp_a_20261026_011239.csv / .meta.txt        graph-allocation-node path
+  exp_a_external_20261026_011239.csv / .meta.txt  external-buffer control
+  run_a_console.log                            build + analyzer output
+  clone_external_nodes_summary.txt             node overlap summary

@@ -1,0 +1,22 @@
+Experiment B smoke command (valid run, after the unit fix)
+
+Environment:
+  python3.12 -m venv /root/autodl-tmp/gate0-env
+  /root/autodl-tmp/gate0-env/bin/pip install vllm==0.29.0
+
+Run:
+  cd experiments/gate0/exp_b_host_work
+  MODEL=/root/autodl-tmp/models/Qwen3-8B-hf \
+  PYTHON=/root/autodl-tmp/gate0-env/bin/python \
+  WORKLOAD=mixed ASYNC=on NUM_PROMPTS=8 OUTPUT_LEN=8 \
+  WARMUP_FULL=0 GPU_MEM=0.70 \
+  ./run_b.sh --max-num-seqs 8 --max-model-len 4096
+
+The script expands to:
+  bench_b.py --model ... --workload mixed --async-scheduling on \
+    --gpu-memory-utilization 0.70 --num-prompts 8 --output-len 8 \
+    --out results/exp_b_mixed_async-on_<stamp>.csv --chunked-prefill \
+    --max-num-seqs 8 --max-model-len 4096
+  analyze_b.py --input <csv> --out <csv>.summary.csv
+
+This is a functional smoke test, not a formal Gate 0 sample.

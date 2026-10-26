@@ -16,5 +16,10 @@ __pycache__/
 *.log
 .env
 
-# Gate 0 raw experiment outputs
-experiments/gate0/**/results/
+# Gate 0 raw experiment outputs. Curated CSVs/logs/summaries are committed
+# under experiments/gate0/results/; binary profiler traces stay local.
+experiments/gate0/exp_*/results/
+experiments/gate0/results/**/*.nsys-rep
+experiments/gate0/results/**/*.sqlite
+experiments/gate0/results/**/*.qdrep
+!experiments/gate0/results/**/*.log
