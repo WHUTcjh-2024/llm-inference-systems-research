@@ -29,7 +29,7 @@ from __future__ import annotations
 import argparse
 import csv
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 
 PHASES = (
@@ -103,6 +103,7 @@ def main() -> None:
     host: list[dict] = []
     device: dict[int, tuple[int, int]] = {}
     resources: dict[int, dict[str, int]] = defaultdict(dict)
+    routes: dict[str, Counter[str]] = defaultdict(Counter)
     k_proxy: dict[int, int] = {}
     epoch_ns = 0
 
@@ -117,11 +118,18 @@ def main() -> None:
                 device[int(row["step"])] = (int(row["start_ns"]), int(row["end_ns"]))
             elif kind == "resource":
                 resources[int(row["step"])][row["phase"]] = int(row["value"])
+            elif kind == "route":
+                routes[row["phase"]][row["value"]] += 1
             elif kind == "k":
                 k_proxy[int(row["step"])] = int(row["value"])
 
     if not host:
         raise SystemExit("No host rows recorded; check patch status and engine process.")
+    if not routes:
+        print("[route] no FlashInfer route rows; this capture cannot verify native/TRTLLM dispatch")
+    else:
+        for name, counts in sorted(routes.items()):
+            print(f"[route] {name}: {dict(sorted(counts.items()))}")
     if not device or not epoch_ns:
         raise SystemExit(
             "No absolute device timeline. Run with device events enabled and a "

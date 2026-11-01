@@ -2,6 +2,8 @@
 
 目标：用 **4–6 GPU 小时**回答两个问题，决定这个选题是否值得继续。
 
+当前进度与无卡核对结果见 [2026-11-01 交接](NO_GPU_HANDOFF_2026-11-01.md)。
+
 1. **A：exec 克隆语义** — 分别检查图内分配节点的实例化限制，以及图外 buffer 被多个 exec 引用时的隔离和并发。
 2. **B：host 工作采集** — 先记录每步 host 阶段，用 CUDA/NVTX 时间线校准 device 时间、GPU 空闲与真实 in-flight 深度，再分类残余不可图化工作。
 
@@ -108,6 +110,10 @@ WORKLOAD=preemption ./run_b.sh
 
 # 对照：关 async
 ASYNC=off WORKLOAD=mixed ./run_b.sh
+
+# 正式矩阵：每次创建独立结果目录，交错重复各配置
+MODEL=/path/to/Qwen3-8B PYTHON=/path/to/python \
+  REPEATS=3 WITH_NSYS=1 ./run_formal.sh
 ```
 
 `run_b.sh` 默认完整预热相同负载（`WARMUP_FULL=0` 可用于短 smoke），以减少

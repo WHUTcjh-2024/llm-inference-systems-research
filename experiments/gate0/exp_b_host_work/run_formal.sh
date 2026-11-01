@@ -19,43 +19,52 @@ GPU_MEM="${GPU_MEM:-0.70}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-8}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 
-mkdir -p results
+SESSION_DIR="${SESSION_DIR:-results/formal_$(date +%Y%m%d_%H%M%S)}"
+if [[ -e "$SESSION_DIR" ]]; then
+  echo "Session directory already exists: $SESSION_DIR" >&2
+  exit 1
+fi
+mkdir -p "$SESSION_DIR"
+echo "[session] $SESSION_DIR"
 COMMON=(--max-num-seqs "$MAX_NUM_SEQS" --max-model-len "$MAX_MODEL_LEN")
 
 run_config() {
-  local workload="$1" async="$2" tag="$3" gpu_mem="$4"
-  for i in $(seq 1 "$REPEATS"); do
-    echo "=== ${tag} repeat ${i}/${REPEATS} ==="
-    MODEL="$MODEL" \
-      WORKLOAD="$workload" \
-      ASYNC="$async" \
-      NUM_PROMPTS="$NUM_PROMPTS" \
-      OUTPUT_LEN="$OUTPUT_LEN" \
-      WARMUP_FULL=1 \
-      GPU_MEM="$gpu_mem" \
-      PYTHON="$PYTHON" \
-      ./run_b.sh "${COMMON[@]}"
-  done
+  local workload="$1" async="$2" gpu_mem="$3" repeat="$4"
+  echo "=== ${workload} async-${async} repeat ${repeat}/${REPEATS} ==="
+  MODEL="$MODEL" \
+    WORKLOAD="$workload" \
+    ASYNC="$async" \
+    NUM_PROMPTS="$NUM_PROMPTS" \
+    OUTPUT_LEN="$OUTPUT_LEN" \
+    WARMUP_FULL=1 \
+    GPU_MEM="$gpu_mem" \
+    PYTHON="$PYTHON" \
+    OUT_DIR="$SESSION_DIR" \
+    ./run_b.sh "${COMMON[@]}"
 }
 
-echo "=== formal: uniform decode ==="
-run_config uniform on uniform-on "$GPU_MEM"
-
-echo "=== formal: mixed/ragged ==="
-run_config mixed on mixed-on "$GPU_MEM"
-
-echo "=== formal: mixed/ragged, async off ==="
-run_config mixed off mixed-off "$GPU_MEM"
-
+CONFIGS=(uniform:on mixed:on mixed:off)
 if [[ "${WITH_PREEMPTION:-0}" == "1" ]]; then
-  echo "=== formal: preemption churn ==="
-  run_config preemption on preemption-on 0.60
+  CONFIGS+=(preemption:on)
 fi
+for ((i = 1; i <= REPEATS; i++)); do
+  # Rotate the starting configuration between rounds to reduce order bias.
+  for ((j = 0; j < ${#CONFIGS[@]}; j++)); do
+    config="${CONFIGS[$(((i - 1 + j) % ${#CONFIGS[@]}))]}"
+    workload="${config%%:*}"
+    async="${config#*:}"
+    gpu_mem="$GPU_MEM"
+    if [[ "$workload" == "preemption" ]]; then
+      gpu_mem=0.60
+    fi
+    run_config "$workload" "$async" "$gpu_mem" "$i"
+  done
+done
 
 echo "=== clean control: instrumentation vs engine multiprocessing ==="
 for async in on off; do
   for mp in on off; do
-    LOG="results/clean_mixed_async-${async}_mp-${mp}_$(date +%Y%m%d_%H%M%S).log"
+    LOG="${SESSION_DIR}/clean_mixed_async-${async}_mp-${mp}_$(date +%Y%m%d_%H%M%S).log"
     "$PYTHON" bench_clean.py \
       --model "$MODEL" \
       --workload mixed \
@@ -73,9 +82,11 @@ done
 
 if [[ "${WITH_NSYS:-0}" == "1" ]]; then
   echo "=== Nsight: mixed async on/off ==="
+  NSYS_DIR="${SESSION_DIR}/nsys_runs"
+  mkdir -p "$NSYS_DIR"
   for async in on off; do
     STAMP="$(date +%Y%m%d_%H%M%S)"
-    OUT="results/nsys_mixed_async-${async}_${STAMP}"
+    OUT="${NSYS_DIR}/nsys_mixed_async-${async}_${STAMP}"
     MODEL="$MODEL" \
       WORKLOAD=mixed \
       ASYNC="$async" \
@@ -84,6 +95,7 @@ if [[ "${WITH_NSYS:-0}" == "1" ]]; then
       WARMUP_FULL=1 \
       GPU_MEM="$GPU_MEM" \
       PYTHON="$PYTHON" \
+      OUT_DIR="$NSYS_DIR" \
       nsys profile \
         --force-overwrite=true \
         --trace=cuda,nvtx \
@@ -100,4 +112,6 @@ if [[ "${WITH_NSYS:-0}" == "1" ]]; then
 fi
 
 echo "=== aggregate ==="
-"$PYTHON" aggregate_b.py --dir results --out results/formal_aggregate.csv
+"$PYTHON" aggregate_b.py --dir "$SESSION_DIR" \
+  --max-num-seqs "$MAX_NUM_SEQS" \
+  --out "${SESSION_DIR}/formal_aggregate.csv"

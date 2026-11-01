@@ -70,8 +70,8 @@ Python/引擎胶水；单次 smoke 的水平只作方向性参考。
 | preemption | on | pending（可选） | pending | pending | pending | pending |
 
 正式运行命令已写入 `exp_b_host_work/run_formal.sh`：每个配置 3 次，
-随后跑 clean multiprocessing 对照与 Nsight。聚合输出为
-`results/formal_aggregate.csv`。
+随后跑 clean multiprocessing 对照与 Nsight。新版脚本为每次会话创建
+`results/formal_YYYYMMDD_HHMMSS/`，聚合输出位于该目录内。
 
 ### 无效数据（保留，不参与结论）
 

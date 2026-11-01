@@ -291,6 +291,12 @@ class Recorder:
                 return
             self._write_locked(step, name, "", 0, 0, 0, "resource", value)
 
+    def add_route(self, step: int, name: str, value: str) -> None:
+        with self._lock:
+            if not self._enabled:
+                return
+            self._write_locked(step, name, "", 0, 0, 0, "route", value)
+
     def record_scheduler_state(self, step: int, scheduler, output) -> None:
         """Snapshot what the scheduler was constrained by before this step."""
         def safe(fn):
@@ -350,7 +356,7 @@ class Recorder:
         end_ns: int,
         dur_ns: int,
         kind: str,
-        value: int,
+        value: int | str,
     ) -> None:
         self._buffer.append(
             {
@@ -398,6 +404,18 @@ def _wrap(original, phase: str, parent: str, rec: Recorder):
         result = None
         try:
             result = original(*args, **kwargs)
+            if phase == "flashinfer_metadata" and result is not None:
+                rec.add_route(step, "prefill", type(result.prefill).__name__)
+                rec.add_route(step, "decode", type(result.decode).__name__)
+                rec.add_route(step, "num_prefills", str(result.num_prefills))
+                rec.add_route(step, "num_decodes", str(result.num_decodes))
+                decode_wrapper = getattr(result.decode, "wrapper", None)
+                if decode_wrapper is not None:
+                    rec.add_route(
+                        step,
+                        "decode_wrapper_cuda_graph",
+                        str(getattr(decode_wrapper, "is_cuda_graph_enabled", "unknown")),
+                    )
             return result
         finally:
             t1 = time.perf_counter_ns()

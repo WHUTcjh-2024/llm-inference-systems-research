@@ -30,10 +30,11 @@ if [[ "$WORKLOAD" == "preemption" && -z "${GPU_MEM:-}" ]]; then
   GPU_MEM=0.60
 fi
 
-mkdir -p results
+OUT_DIR="${OUT_DIR:-results}"
+mkdir -p "$OUT_DIR"
 STAMP="$(date +%Y%m%d_%H%M%S)"
-OUT="results/exp_b_${WORKLOAD}_async-${ASYNC}_${STAMP}.csv"
-LOG="results/exp_b_${WORKLOAD}_async-${ASYNC}_${STAMP}.log"
+OUT="${OUT_DIR}/exp_b_${WORKLOAD}_async-${ASYNC}_${STAMP}.csv"
+LOG="${OUT_DIR}/exp_b_${WORKLOAD}_async-${ASYNC}_${STAMP}.log"
 
 ARGS=(
   --model "$MODEL"

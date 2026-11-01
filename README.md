@@ -8,6 +8,7 @@
 
 - [选题深化：Safe Lookahead](docs/research/2026-10-22_SafeLookahead_重叠深度_选题深化.md)：Gate 0 测量设计、CUDA Graph 设计空间、核心创新、单卡实验与止损。
 - [Gate 0 实验脚本](experiments/gate0/README.md)：exec 克隆语义 + 残余 host 工作基线，4–6 GPU 小时拿到 go/no-go。
+- [2026-11-01 无卡交接](experiments/gate0/NO_GPU_HANDOFF_2026-11-01.md)：vLLM 0.29.0 的实际分流与等待链、证据边界、正式上卡顺序。
 
 2026-10-21 的两份三方向文档已在收敛后移除；仍然有效的文献先例压缩在新文档第七节。
 
@@ -15,7 +16,7 @@
 
 | 项目 | 状态 |
 |---|---|
-| 锚定：Safe Lookahead（重叠深度） | Gate 0（8–10 周）：exec 克隆语义、残余 host 工作、`k_actual` 与 `k_res`/`k_dep` 归因；尚无本项目 GPU 数据 |
+| 锚定：Safe Lookahead（重叠深度） | Gate 0 未完成：H20 的 exec 克隆语义实验已完成；残余 host 工作只有一次有效 smoke。正式重复、Nsight 校准和多进程对照未完成，尚无端到端性能结论。 |
 | 案例 1：增量式 Attention Plan | 收敛为 plan buffer 生命周期案例；不再独立立项 |
 | 案例 2：混合模型图安全 Prefill | 收敛为 recurrent state slot 的图内版本案例；#61779/#61952 是公开在途 PR（未合入），#62749 为 draft，存在撞车风险 |
 | 案例 3：角色感知缓存与执行 | 收敛为 KV block 回收案例；不再独立立项 |

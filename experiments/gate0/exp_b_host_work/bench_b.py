@@ -119,6 +119,7 @@ def main() -> None:
         f"runner_v2={config.use_v2_model_runner} "
         f"chunked_prefill={config.scheduler_config.enable_chunked_prefill} "
         f"attn_backend={config.attention_config.backend} "
+        f"cudagraph_mode={config.compilation_config.cudagraph_mode} "
         f"prefix_caching={config.cache_config.enable_prefix_caching}",
         file=sys.stderr,
     )
