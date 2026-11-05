@@ -1,29 +1,40 @@
 # 大模型推理算子与引擎研究
 
-本私有仓库保存当前选题、文献复审和后续经过审核的实验协议与结果。当前锚定方向是 **Safe Lookahead：把 host 重叠深度当作可调度资源**。核心问题是：**CUDA Graph 逐步接管 host 常驻工作之后，剩余的重叠深度 `k` 由什么决定、受什么约束、如何用有限显存把 `k` 顶到最大**；版本/所有权协议只是实现手段。代码落在 vLLM、SGLang、FlashInfer、FlashAttention。
+本仓库围绕 AI Infrastructure / LLM Inference Systems 的真实系统问题开展研究。当前唯一锚定方向是 **Safe Lookahead：图化推理中的安全 Host–Device Overlap Depth**。
 
-当前阶段是 **Gate 0（8–10 周）**：只做 vLLM + FlashInfer 的 plan buffer。第一周先做两件事：exec 克隆的 workspace/并发语义实验，以及每步残余不可图化 host 工作的基线。随后证明目标负载上 `k>1`，把损失归因为 `k_res` 还是 `k_dep`，并检验残余 host 工作是否 ≥5% step time。主场景是 mixed/ragged batch，preemption churn 次之，spec decode 只作 `k_dep` 边界案例。若 `k_dep` 恒为 1、残余 host 工作 <5% 或残余 gap <3%，转 Plan B（checker/诊断工具独立成篇）。
+## 唯一研究主文档
 
-## 从这里开始
+- [Safe Lookahead Research Master（2026-11-06）](docs/research/SafeLookahead_Research_Master_2026-11-06.md)
 
-- [选题深化：Safe Lookahead](docs/research/2026-10-22_SafeLookahead_重叠深度_选题深化.md)：Gate 0 测量设计、CUDA Graph 设计空间、核心创新、单卡实验与止损。
-- [阶段分析（2026-11-06）](docs/research/SafeLookahead_阶段分析_2026-11-06.md)：汇总 Idea、候选创新、已有实验、论文初稿成熟度、AI Native Research 工作流与下一阶段行动。
-- [Gate 0 实验脚本](experiments/gate0/README.md)：exec 克隆语义 + 残余 host 工作基线，4–6 GPU 小时拿到 go/no-go。
-- [2026-11-01 无卡交接](experiments/gate0/NO_GPU_HANDOFF_2026-11-01.md)：vLLM 0.29.0 的实际分流与等待链、证据边界、正式上卡顺序。
+该文档统一维护 Idea、问题模型、候选创新、相关工作、已有实验与证据边界、Gate 0 协议、GPU 策略、论文进度、AI Native Research 工作流和后续路线。后续研究设计与阶段状态以该文档为准，不再维护重复的选题深化、阶段总结、论文蓝图和证据表副本。
 
-2026-10-21 的两份三方向文档已在收敛后移除；仍然有效的文献先例压缩在新文档第七节。
+## 当前阶段
 
-## 当前状态
+**Gate 0 / Research Validation：尚未通过。**
 
-| 项目 | 状态 |
-|---|---|
-| 锚定：Safe Lookahead（重叠深度） | Gate 0 未完成：H20 的 exec 克隆语义实验已完成；残余 host 工作只有一次有效 smoke。正式重复、Nsight 校准和多进程对照未完成，尚无端到端性能结论。 |
-| 案例 1：增量式 Attention Plan | 收敛为 plan buffer 生命周期案例；不再独立立项 |
-| 案例 2：混合模型图安全 Prefill | 收敛为 recurrent state slot 的图内版本案例；#61779/#61952 是公开在途 PR（未合入），#62749 为 draft，存在撞车风险 |
-| 案例 3：角色感知缓存与执行 | 收敛为 KV block 回收案例；不再独立立项 |
+目前已有 H20 上的 CUDA Graph executable / 外部 buffer 隔离微基准，以及一次 vLLM mixed workload smoke。正式重复实验、Nsight Systems 校准、clean multiprocessing 对照和 `k_res` / `k_dep` 定量归因仍未完成；当前没有可声称的端到端性能收益。
 
-第一轮以 [FlashInfer](https://github.com/flashinfer-ai/flashinfer) 与 [vLLM](https://github.com/vllm-project/vllm) 为主要代码路径，Stage 3 再评估 [SGLang](https://github.com/sgl-project/sglang)；[FlashAttention](https://github.com/Dao-AILab/flash-attention) 是无状态强基线。DeepGEMM 与 DeepInfer 只作设计参考，不作为单卡主验证对象。
+下一步优先完成：
 
-## 数据原则
+1. 锁定 GPU、驱动、CUDA、PyTorch、vLLM、FlashInfer 和模型版本；
+2. 完成 Graph Exec Clone 地址 / 并发污染实验；
+3. 建立 per-step Host / Device 时间线与残余 Host 工作基线；
+4. 完成 mixed + async on、mixed + async off、uniform + async on 的重复实验；
+5. 使用 Nsight Systems 校准，并完成 clean multiprocessing 对照；
+6. 按预注册阈值决定 GO / PIVOT / STOP。
 
-只提交源码、配置、实验协议及审阅后的精简结果；不提交 checkpoint、缓存、原始 trace、完整日志或密钥。论文叙述须区分公开报告、本项目 GPU 正确性与本项目测量的端到端性能。
+## 实验入口
+
+- [Gate 0 实验说明](experiments/gate0/README.md)
+- [2026-11-01 无 GPU 交接记录](experiments/gate0/NO_GPU_HANDOFF_2026-11-01.md)
+
+## 代码路径
+
+第一阶段以 [vLLM](https://github.com/vllm-project/vllm) + [FlashInfer](https://github.com/flashinfer-ai/flashinfer) 为主。SGLang 和其他后端属于后续泛化，不纳入 Gate 0。
+
+## 数据与证据原则
+
+- 区分本项目实测、公开 Issue / PR 报告、研究假设和未来计划。
+- 所有性能结论必须对应代码版本、GPU、模型、负载配置、原始数据和可复现实验。
+- 不把单次 smoke 或 CUDA 微基准外推为端到端推理收益。
+- 不提交模型 checkpoint、缓存、密钥和不必要的大型二进制 Trace；原始实验数据与失败记录按实验目录规则保留。
