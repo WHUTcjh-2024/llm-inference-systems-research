@@ -587,7 +587,7 @@ Stage 1 再补充：
 - 性能数据来自重复且控制变量明确的实验；
 - 失败结果和局限如实写入。
 
-此前的 10–15 天估计仅在 Gate 0 快速通过、机制实现顺利时成立，不是保证。如果 Gate 0 证伪核心假设，必须调整主张，不能为了按期交稿制造收益。
+此前粗略估计：若 Gate 0 快速通过、目标对象明确且机制实现顺利，集中投入约 10–15 天可能完成有实验支撑的初稿；这是条件估计，不是保证。若 Gate 0 证伪核心假设，必须调整主张，不能为了按期交稿制造收益。
 
 ### 10.6 Plan B：Checker / 诊断工具
 
@@ -652,9 +652,9 @@ Checker 是动态辅助，不是形式化证明，也不预设一定能发表。
 ### 12.1 本项目材料
 
 - [GitHub 仓库](https://github.com/WHUTcjh-2024/llm-inference-systems-research)
-- [Gate 0 实验说明](../..//experiments/gate0/README.md)
+- [Gate 0 实验说明](../../experiments/gate0/README.md)
 - [2026-11-01 无 GPU 交接记录](../../experiments/gate0/NO_GPU_HANDOFF_2026-11-01.md)
-- [Week 1 实验报告](../../experiments/gate0/results/2026-10-26_h20/week1_report.md)
+- [Week 1 实验报告](../../experiments/gate0/results/week1_report_2026-10-23.md)
 
 ### 12.2 工程与 API 参考
 
