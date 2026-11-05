@@ -7,6 +7,7 @@
 ## 从这里开始
 
 - [选题深化：Safe Lookahead](docs/research/2026-10-22_SafeLookahead_重叠深度_选题深化.md)：Gate 0 测量设计、CUDA Graph 设计空间、核心创新、单卡实验与止损。
+- [阶段分析（2026-11-06）](docs/research/SafeLookahead_阶段分析_2026-11-06.md)：汇总 Idea、候选创新、已有实验、论文初稿成熟度、AI Native Research 工作流与下一阶段行动。
 - [Gate 0 实验脚本](experiments/gate0/README.md)：exec 克隆语义 + 残余 host 工作基线，4–6 GPU 小时拿到 go/no-go。
 - [2026-11-01 无卡交接](experiments/gate0/NO_GPU_HANDOFF_2026-11-01.md)：vLLM 0.29.0 的实际分流与等待链、证据边界、正式上卡顺序。
 
